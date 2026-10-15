@@ -1,0 +1,4 @@
+/target
+# Release binaries live on GitHub Releases, not in git (they are ~30-60MB).
+/RsClicker-26.10.15
+/*.exe

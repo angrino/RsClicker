@@ -1,0 +1,29 @@
+[package]
+name = "RsClicker"
+version = "0.1.0"
+edition = "2021"
+authors = ["voidx9x"]
+license = "MIT"
+description = "Cross-platform auto clicker written in Rust"
+keywords = ["autoclicker", "automation", "gui"]
+categories = ["gui"]
+
+[package.metadata.rsclicker]
+release = "26.10.15"
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio"] }
+enigo = { version = "0.6", features = ["wayland", "x11rb", "libei_tokio", "tokio", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+global-hotkey = { package = "wayclip-global-hotkey", version = "0.7", features = ["serde"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }
+
+# Linux (Wayland/X11): raw input monitoring for mouse-button triggers.
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+
+# Windows 10/11: global mouse-button listener for mouse triggers.
+[target.'cfg(target_os = "windows")'.dependencies]
+rdev = "0.5"
