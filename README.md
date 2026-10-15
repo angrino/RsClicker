@@ -1,5 +1,10 @@
 # RsClicker
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/release-26.10.15-blue.svg)](docs/VERSIONING.md)
+![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)
+![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)
+
 A cross-platform auto clicker written in Rust.
 
 Create profiles, arm them with a keyboard hotkey or a mouse button (including
@@ -8,10 +13,8 @@ side buttons), and fire precise click sequences anywhere. Built with
 for input emulation, and raw input monitoring (evdev on Linux, rdev on
 Windows 10/11) for global mouse triggers.
 
-- Repository: <https://github.com/voidx9x/RsClicker>
-- Author: voidx9x
-- License: MIT (see [LICENSE](LICENSE))
-- Release: **26.10.15** (date-based, see [docs/VERSIONING.md](docs/VERSIONING.md))
+<!-- TODO: add a screenshot or GIF, e.g. docs/screenshot.png -->
+![RsClicker screenshot](docs/screenshot.png)
 
 ## Features
 
@@ -28,30 +31,68 @@ Windows 10/11) for global mouse triggers.
 - **Animated splash** with brand intro, modal dialogs, settings persisted to
   disk.
 
-## Quick start
+## Installation
+
+### Pre-built binaries
+
+Download the latest build for your platform from the
+[Releases page](https://github.com/voidx9x/RsClicker/releases).
+
+<!-- TODO: list the actual artifacts (e.g. Windows .exe, Linux AppImage / tarball) -->
+
+### Build from source
+
+Requires a recent stable [Rust toolchain](https://rustup.rs).
 
 ```bash
+git clone https://github.com/voidx9x/RsClicker.git
+cd RsClicker
 cargo build --release
 ./target/release/RsClicker
 ```
+
+Windows cross-compilation and other build details are in
+[docs/BUILDING.md](docs/BUILDING.md).
+
+## Quick start
 
 1. Press **+** to create a profile.
 2. Open it with **⚙**, set timing/clicks/target, then **Capture** your trigger.
 3. Back on the main screen press **▶** — it turns orange (listening).
 4. Press your trigger key/button: green means clicking. Press again to stop.
 
-Details in [docs/USAGE.md](docs/USAGE.md). Build instructions (Linux +
-Windows cross-compilation) in [docs/BUILDING.md](docs/BUILDING.md).
+More in [docs/USAGE.md](docs/USAGE.md).
 
 ## Requirements
 
-- **Linux:** Wayland or X11. Global hotkeys need
-  `org.freedesktop.portal.GlobalShortcuts`; clicking on Wayland needs
-  `org.freedesktop.portal.RemoteDesktop` (GNOME/KDE/Hyprland provide these;
-  minimal compositors may not — the app reports this as a red ERROR state
-  instead of crashing). Mouse triggers need read access to `/dev/input`
-  (membership in the `input` group).
-- **Windows 10/11:** works out of the box (Win32 hotkeys, hooks, SendInput).
+### Linux
+
+Wayland or X11.
+
+- **Global hotkeys** need `org.freedesktop.portal.GlobalShortcuts`.
+- **Clicking on Wayland** needs `org.freedesktop.portal.RemoteDesktop`.
+  GNOME, KDE and Hyprland provide these; minimal compositors may not — the app
+  reports this as a red ERROR state instead of crashing.
+- **Mouse triggers** need read access to `/dev/input`. Add your user to the
+  `input` group, then log out and back in:
+
+  ```bash
+  sudo usermod -aG input $USER
+  ```
+
+### Windows 10/11
+
+Works out of the box (Win32 hotkeys, hooks, SendInput).
+
+### macOS
+
+Not currently supported.
+
+## Disclaimer
+
+Using auto clickers may violate the terms of service of some games and
+online services, and can result in a ban. Use RsClicker responsibly and at your
+own risk; the author is not responsible for any consequences.
 
 ## Project layout
 
@@ -72,8 +113,19 @@ docs/                usage, architecture, building, versioning
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Contributing
+
+Bug reports, feature requests and pull requests are welcome.
+
+- Found a bug or have an idea? [Open an issue](https://github.com/voidx9x/RsClicker/issues).
+- Before sending a PR, please run `cargo fmt` and `cargo clippy`, and describe
+  what you tested and on which platform.
+
 ## Credits
 
-Developed with the [opencode](https://opencode.ai) coding tool, with human
-touches (design decisions, testing on real hardware, all product choices) by
-**voidx9x**. Licensed under MIT.
+Developed with AI assistance ([opencode](https://opencode.ai)); design,
+testing on real hardware, and all product decisions by **voidx9x**.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
