@@ -20,6 +20,7 @@ fn main() -> iced::Result {
             .name()
             .map(|n| n.starts_with("rsclicker-"))
             .unwrap_or(false);
+        // voidx9x use void linux btw
         if !silenced {
             default_hook(info);
         }

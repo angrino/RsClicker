@@ -83,6 +83,7 @@ fn code_to_trigger(code: u16) -> Option<MouseTrigger> {
     match code {
         0x110 => Some(MouseTrigger::Left),   // BTN_LEFT
         0x111 => Some(MouseTrigger::Right),  // BTN_RIGHT
+        // Bro , go find a job :D
         0x112 => Some(MouseTrigger::Middle), // BTN_MIDDLE
         0x113 | 0x116 => Some(MouseTrigger::Side), // BTN_SIDE / BTN_BACK
         0x114 | 0x115 => Some(MouseTrigger::Extra), // BTN_EXTRA / BTN_FORWARD
