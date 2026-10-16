@@ -12,8 +12,41 @@ fn profile_path(name: &str) -> Option<PathBuf> {
     profiles_dir().map(|d| d.join(format!("{}.json", sanitize_name(name))))
 }
 
+/// DOS device names are reserved on Windows even with an extension
+/// (pre-Win11 semantics — our targets include Win10): writing e.g.
+/// `NUL.json` reports success while going nowhere. Such sanitized names get
+/// a trailing `_` on every platform.
+fn is_reserved_name(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .map(|c| match c {
+            '⁰' => '0',
+            '¹' => '1',
+            '²' => '2',
+            '³' => '3',
+            '⁴' => '4',
+            '⁵' => '5',
+            '⁶' => '6',
+            '⁷' => '7',
+            '⁸' => '8',
+            '⁹' => '9',
+            _ => c,
+        })
+        .collect();
+    let upper = normalized.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+        | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9" => {
+            true
+        }
+        _ => false,
+    }
+}
+
 fn sanitize_name(name: &str) -> String {
-    name.chars()
+    let mut name: String = name
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -21,7 +54,11 @@ fn sanitize_name(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if is_reserved_name(&name) {
+        name.push('_');
+    }
+    name
 }
 
 /// True when both names map to the same profile file after sanitization.
@@ -82,4 +119,43 @@ pub fn list_profiles() -> Vec<String> {
 pub fn delete_profile(name: &str) -> Result<(), String> {
     let path = profile_path(name).ok_or("config dir unavailable")?;
     fs::remove_file(path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_reserved_name, same_profile_file, sanitize_name};
+
+    #[test]
+    fn reserved_names_get_suffix() {
+        for reserved in ["NUL", "con", "Com3", "lpt9", "COM¹", "lpt¹"] {
+            let sanitized = sanitize_name(reserved);
+            assert!(
+                sanitized.ends_with('_') && !is_reserved_name(&sanitized),
+                "reserved name survived: {reserved:?} -> {sanitized:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_names_untouched() {
+        for name in ["Normal name", "Μy-note_2", "COM10", "COM¹²", "nul_", "a/b", "yes.exe"] {
+            assert_eq!(sanitize_name(name), {
+                name.chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>()
+            });
+        }
+    }
+
+    #[test]
+    fn sanitize_collision_matrix() {
+        assert!(same_profile_file("a/b", "a:b"));
+        assert!(!same_profile_file("one", "two"));
+    }
 }

@@ -102,6 +102,25 @@ heading.
 - Accepted limit: full power-loss durability (directory fsync) is out of
   scope; the threat model is process kill / crash / disk-full.
 
+### Fixed (high): Windows reserved device names silently eat saves
+- Symptom: on Win10/11 (pre-Win11 rule kept for the 10/11 targets)
+  `NUL.json`, `CON.json`, `COM1.json`… are DOS devices even with an
+  extension — `fs::write` reported success while the file went nowhere: a
+  profile was "created" but never listed, never saved. `sanitize_name`
+  already rejected dots and spaces, but kept these bases (and superscript
+  digits like `COM¹` pass `char::is_alphanumeric`, so they survived too).
+- Fix (`src/profile/store.rs`): `is_reserved_name` (case-insensitive,
+  superscript digits normalized to ASCII) + `sanitize_name` appends `_`
+  to reserved bases on every platform (universal rule, as agreed) →
+  `NUL` is stored as `NUL_.json`, which is a safe regular file.
+- Unit tests: reserved bases (lower case, mixed case, `COM¹`) get the
+  suffix; plain names (`COM10`, `COM¹²`, `nul_`) untouched; the
+  `a/b` vs `a:b` collision matrix unchanged.
+- Accepted edge: legacy profiles already saved under a reserved name on
+  Linux (rare) stay listed but fail to load — consequence of the
+  universal rule.
+
 ### Session verification
-- `cargo test --release`: 9 tests pass (7 earlier + 2 atomic-file).
+- `cargo test --release`: 12 tests pass (engine 6, mouse monitor 1,
+  atomic-file 2, reserved names 3).
 - `cargo build --release`: clean.
