@@ -1,11 +1,16 @@
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::types::{create_enigo, perform_single_click, ClickConfig};
+
+/// Grace period `stop()` waits for an in-flight click to finish before it
+/// hands the join to a reaper thread.
+const STOP_WAIT_MS: u64 = 50;
 
 /// Why a click engine failed to run.
 #[derive(Debug, Clone)]
@@ -31,7 +36,14 @@ impl std::fmt::Display for StartError {
 
 pub struct ClickEngine {
     running: Arc<AtomicBool>,
+    /// Identity token of the spawned worker, bumped by `start()` before it
+    /// raises the flag. Worker tails touch shared state only while they are
+    /// still the current generation — without the old blocking join, the
+    /// tail of an in-flight old worker could clobber the next worker.
+    generation: Arc<AtomicU64>,
     handle: Option<JoinHandle<()>>,
+    /// Per-worker exit signal; `stop()` waits up to `STOP_WAIT_MS` on it.
+    done_rx: Option<Receiver<()>>,
     /// Set by the worker thread when it fails to start (e.g. enigo backend
     /// missing). Drained by the UI to surface an ERROR state.
     error: Arc<Mutex<Option<String>>>,
@@ -47,7 +59,9 @@ impl ClickEngine {
     pub fn new() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
             handle: None,
+            done_rx: None,
             error: Arc::new(Mutex::new(None)),
         }
     }
@@ -64,49 +78,60 @@ impl ClickEngine {
     pub fn start(&mut self, config: ClickConfig) {
         self.stop();
         *self.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.running.store(true, Ordering::SeqCst);
         let flag = Arc::clone(&self.running);
+        let generation = Arc::clone(&self.generation);
         let error = Arc::clone(&self.error);
-        let flag_for_spawn = Arc::clone(&flag);
-        let error_for_spawn = Arc::clone(&error);
+        let (done_tx, done_rx) = channel();
+        self.done_rx = Some(done_rx);
 
+        // The whole worker body is wrapped in `catch_unwind`: a panic inside
+        // the click loop (e.g. enigo internals) records "Engine crashed: …"
+        // and clears the flag, so the UI shows the red ERROR state instead
+        // of a zombie running state.
         let worker = thread::Builder::new()
             .name("rsclicker-click".to_string())
             .spawn(move || {
-                let flag = flag_for_spawn;
-                let error = error_for_spawn;
-                // The whole worker body is wrapped in `catch_unwind`: a panic
-                // inside the click loop (e.g. enigo internals) must not leave
-                // the engine stuck flagged as running with no clicks and no
-                // error. A crash is recorded in the error slot instead, which
-                // the UI drains each tick and surfaces as the red ERROR state.
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || worker_body(&flag, &error, &config),
+                    || worker_body(&flag, &error, &generation, gen, &config),
                 ));
-                if let Err(payload) = outcome {
-                    let msg = panic_message(payload.as_ref());
-                    *error.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(format!("Engine crashed: {msg}"));
+                if generation.load(Ordering::SeqCst) == gen {
+                    if let Err(payload) = outcome {
+                        let msg = panic_message(payload.as_ref());
+                        *error.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(format!("Engine crashed: {msg}"));
+                    }
+                    clear_flag_if_current(&flag, &generation, gen);
                 }
-                // Safety net: a thread that has ended must never leave the
-                // running flag raised. No race with a new `start()`, which
-                // only raises the flag after `stop()` joins this thread.
-                flag.store(false, Ordering::SeqCst);
+                let _ = done_tx.send(());
             });
         match worker {
             Ok(handle) => self.handle = Some(handle),
             Err(e) => {
-                *error.lock().unwrap_or_else(|e| e.into_inner()) =
+                self.done_rx = None;
+                *self.error.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(format!("failed to spawn click thread: {e}"));
-                flag.store(false, Ordering::SeqCst);
+                self.running.store(false, Ordering::SeqCst);
             }
         }
     }
 
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        // Never join on the caller thread: an in-flight click (or a hung
+        // portal call) would freeze the UI. Wait briefly for the worker's
+        // exit signal so a rapid restart doesn't overlap its last click,
+        // then hand the join to a detached reaper.
+        if let Some(done_rx) = self.done_rx.take() {
+            let _ = done_rx.recv_timeout(Duration::from_millis(STOP_WAIT_MS));
+        }
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            let _ = thread::Builder::new()
+                .name("rsclicker-join".to_string())
+                .spawn(move || {
+                    let _ = handle.join();
+                });
         }
     }
 }
@@ -117,26 +142,34 @@ impl Drop for ClickEngine {
     }
 }
 
-/// Runs the click loop for one worker thread. Reports startup failure
-/// (no backend) through `error` and clears `flag` on every exit path.
-fn worker_body(flag: &AtomicBool, error: &Mutex<Option<String>>, config: &ClickConfig) {
-    // enigo may panic internally when no backend exists (notably the
-    // libei RemoteDesktop portal path on Wayland). Catch it so the
-    // whole app doesn't go down; report through the error flag.
+/// Runs the click loop for one worker thread. Reports startup failure (no
+/// backend) through `error`, but only while `gen` is the current generation.
+fn worker_body(
+    flag: &AtomicBool,
+    error: &Mutex<Option<String>>,
+    generation: &AtomicU64,
+    gen: u64,
+    config: &ClickConfig,
+) {
+    // enigo may panic internally when no backend exists (notably the libei
+    // RemoteDesktop portal path on Wayland). Catch it so the whole app
+    // doesn't go down; report through the error flag.
     let mut enigo = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         create_enigo,
     )) {
         Ok(Some(e)) => e,
         Ok(None) => {
-            *error.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(StartError::NoBackend("enigo").to_string());
-            flag.store(false, Ordering::SeqCst);
+            if generation.load(Ordering::SeqCst) == gen {
+                *error.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(StartError::NoBackend("enigo").to_string());
+            }
             return;
         }
         Err(_) => {
-            *error.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(StartError::NoBackend("enigo/libei").to_string());
-            flag.store(false, Ordering::SeqCst);
+            if generation.load(Ordering::SeqCst) == gen {
+                *error.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(StartError::NoBackend("enigo/libei").to_string());
+            }
             return;
         }
     };
@@ -145,15 +178,22 @@ fn worker_body(flag: &AtomicBool, error: &Mutex<Option<String>>, config: &ClickC
     while flag.load(Ordering::SeqCst) {
         perform_single_click(&mut enigo, config, index);
         index = index.wrapping_add(1);
-        // Sleep in small slices so `stop()` reacts immediately even
-        // when the configured interval is very large (minutes/hours).
-        // Without this, joining the worker thread would freeze the UI.
+        // Sleep in small slices so `stop()` reacts quickly even when the
+        // configured interval is very large (minutes/hours).
         let mut remaining = interval;
         while remaining > 0 && flag.load(Ordering::SeqCst) {
             let step = remaining.min(50);
             thread::sleep(Duration::from_millis(step));
             remaining = remaining.saturating_sub(step);
         }
+    }
+}
+
+/// Worker tail: clears the running flag only while this worker is still the
+/// current generation.
+fn clear_flag_if_current(flag: &AtomicBool, generation: &AtomicU64, gen: u64) {
+    if generation.load(Ordering::SeqCst) == gen {
+        flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -170,8 +210,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::panic_message;
+    use super::{clear_flag_if_current, panic_message};
     use std::panic::{catch_unwind, panic_any};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     #[test]
     fn str_payload() {
@@ -189,5 +230,15 @@ mod tests {
     fn non_string_payload() {
         let payload = catch_unwind(|| panic_any(7u32)).unwrap_err();
         assert_eq!(panic_message(payload.as_ref()), "unknown panic payload");
+    }
+
+    #[test]
+    fn stale_generation_cannot_clobber_flag() {
+        let flag = AtomicBool::new(true);
+        let generation = AtomicU64::new(2);
+        clear_flag_if_current(&flag, &generation, 1);
+        assert!(flag.load(Ordering::SeqCst));
+        clear_flag_if_current(&flag, &generation, 2);
+        assert!(!flag.load(Ordering::SeqCst));
     }
 }
