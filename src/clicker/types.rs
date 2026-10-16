@@ -70,24 +70,40 @@ impl ClickConfig {
     }
 }
 
-pub fn perform_single_click(enigo: &mut Enigo, config: &ClickConfig, seq_index: usize) {
+/// Performs one click (move + press). `Err` means injection failed: the
+/// engine must stop instead of silently clicking nothing.
+pub fn perform_single_click(
+    enigo: &mut Enigo,
+    config: &ClickConfig,
+    seq_index: usize,
+) -> Result<(), String> {
     match &config.target {
         ClickTarget::Fixed { x, y } => {
-            let _ = enigo.move_mouse(*x, *y, Coordinate::Abs);
+            enigo
+                .move_mouse(*x, *y, Coordinate::Abs)
+                .map_err(|e| e.to_string())?;
         }
         ClickTarget::Sequence(points) => {
-            if let Some((x, y)) = points.get(seq_index % points.len().max(1)) {
-                let _ = enigo.move_mouse(*x, *y, Coordinate::Abs);
-            }
+            let (x, y) = points
+                .get(seq_index % points.len().max(1))
+                .ok_or_else(|| "empty sequence".to_string())?;
+            enigo
+                .move_mouse(*x, *y, Coordinate::Abs)
+                .map_err(|e| e.to_string())?;
         }
         ClickTarget::CurrentPosition => {}
     }
 
     let button: Button = config.button.into();
-    let _ = enigo.button(button, Direction::Click);
+    enigo
+        .button(button, Direction::Click)
+        .map_err(|e| e.to_string())?;
     if config.kind == ClickKind::Double {
-        let _ = enigo.button(button, Direction::Click);
+        enigo
+            .button(button, Direction::Click)
+            .map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
 pub fn create_enigo() -> Option<Enigo> {

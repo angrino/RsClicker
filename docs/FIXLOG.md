@@ -52,3 +52,24 @@ the next release is cut.
 - Verified: `cargo test --release` (4 tests pass) and `cargo build --release`.
 - Doc note: ARCHITECTURE.md still says "stop signals and joins it" — reword
   in the final doc rewrite.
+
+## Session 3 — 2026-10-16
+
+### Fixed (critical): silent injection failures (green running, zero clicks)
+- Symptom: every enigo call in `perform_single_click` discarded its result
+  (`let _ =`), so a denied portal, a dead session or a broken backend left
+  the engine green "Running" with no clicks and nothing in the error slot.
+- Fix:
+  - `src/clicker/types.rs`: `perform_single_click` now returns
+    `Result<(), String>`; `move_mouse` and `button` failures abort the
+    click (fail-fast — clicking in a wrong place is worse than not
+    clicking), and an empty `Sequence` target is rejected defensively.
+  - `src/clicker/engine.rs`: the click loop is factored into
+    `run_click_loop`; the first injection failure records
+    `Click failed: <reason>` in the engine error slot (only while the
+    worker is still the current generation) and exits the loop — the
+    existing generation-guarded tail clears the flag, so the UI surfaces
+    the red ERROR state and the profile stays re-armable.
+- Added two deterministic unit tests for the new loop semantics (no enigo
+  needed: fail-fast reporting, and stale-generation errors being dropped).
+- Verified: `cargo test --release` (6 tests pass) and `cargo build --release`.

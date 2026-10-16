@@ -142,8 +142,9 @@ impl Drop for ClickEngine {
     }
 }
 
-/// Runs the click loop for one worker thread. Reports startup failure (no
-/// backend) through `error`, but only while `gen` is the current generation.
+/// Creates the enigo backend and runs the click loop. Reports startup
+/// failure (no backend) through `error`, but only while `gen` is the
+/// current generation.
 fn worker_body(
     flag: &AtomicBool,
     error: &Mutex<Option<String>>,
@@ -174,9 +175,31 @@ fn worker_body(
         }
     };
     let interval = config.sanitized_interval_ms();
+    run_click_loop(flag, generation, gen, error, interval, |index| {
+        perform_single_click(&mut enigo, config, index)
+    });
+}
+
+/// Click engine core: runs `click_once` while the running flag holds and
+/// fail-fasts on the first injection failure (a denied backend keeps
+/// failing forever — continuing would stay green while clicking nothing).
+fn run_click_loop(
+    flag: &AtomicBool,
+    generation: &AtomicU64,
+    gen: u64,
+    error: &Mutex<Option<String>>,
+    interval: u64,
+    mut click_once: impl FnMut(usize) -> Result<(), String>,
+) {
     let mut index = 0usize;
     while flag.load(Ordering::SeqCst) {
-        perform_single_click(&mut enigo, config, index);
+        if let Err(e) = click_once(index) {
+            if generation.load(Ordering::SeqCst) == gen {
+                *error.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(format!("Click failed: {e}"));
+            }
+            break;
+        }
         index = index.wrapping_add(1);
         // Sleep in small slices so `stop()` reacts quickly even when the
         // configured interval is very large (minutes/hours).
@@ -210,9 +233,10 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_flag_if_current, panic_message};
+    use super::{clear_flag_if_current, panic_message, run_click_loop};
     use std::panic::{catch_unwind, panic_any};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     #[test]
     fn str_payload() {
@@ -240,5 +264,38 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst));
         clear_flag_if_current(&flag, &generation, 2);
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn click_failure_stops_engine_and_reports() {
+        let flag = AtomicBool::new(true);
+        let generation = AtomicU64::new(0);
+        let error: Mutex<Option<String>> = Mutex::new(None);
+        run_click_loop(&flag, &generation, 0, &error, 1, |i| {
+            if i < 2 {
+                Ok(())
+            } else {
+                Err("portal denied".to_string())
+            }
+        });
+        assert_eq!(
+            error.lock().unwrap().as_deref(),
+            Some("Click failed: portal denied")
+        );
+        // The worker tail (generation-guarded) owns the flag clearing.
+        clear_flag_if_current(&flag, &generation, 0);
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn click_error_from_stale_generation_is_dropped() {
+        let flag = AtomicBool::new(true);
+        let generation = AtomicU64::new(2);
+        let error: Mutex<Option<String>> = Mutex::new(None);
+        run_click_loop(&flag, &generation, 1, &error, 1, |_| {
+            Err("late".to_string())
+        });
+        assert!(error.lock().unwrap().is_none());
+        assert!(flag.load(Ordering::SeqCst));
     }
 }
