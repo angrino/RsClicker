@@ -73,3 +73,27 @@ the next release is cut.
 - Added two deterministic unit tests for the new loop semantics (no enigo
   needed: fail-fast reporting, and stale-generation errors being dropped).
 - Verified: `cargo test --release` (6 tests pass) and `cargo build --release`.
+
+## Session 4 — 2026-10-16
+
+### Fixed (high): silent mouse-trigger monitor (no feedback, dead readers, no hot-plug)
+- Symptom: `evdev::enumerate()` swallows its own errors (verified from the
+  crate source), so an unreadable `/dev/input` passed silently; a reader
+  thread dying on its first error was gone forever; devices plugged in
+  after startup were never monitored; on Windows a failed `rdev::listen`
+  hook stayed silent.
+- Fix (`src/mouse.rs`, arming gate in `src/app.rs`):
+  - `spawn_monitor` returns a `MouseMonitor` carrying a shared
+    `MonitorStatus` (`Unknown` / `Running(n)` / `Unavailable(reason)`).
+  - Linux: a permanent scanner re-enumerates every 5 s and respawns dead
+    readers (`reader_wanted` dedupe + per-reader alive flags) — dead
+    readers and hot-plugged devices self-heal within one rescan;
+    availability is self-detected (`read_dir` + readable mouse count),
+    never taken from evdev's silent errors.
+  - Windows: a failed hook records `Unavailable("mouse hook failed: …")`.
+  - `toggle_arm` refuses to arm a mouse trigger while the monitor is
+    `Unavailable` and shows the reason in the status line; arming during
+    the first-scan `Unknown` window stays allowed; no proactive status
+    noise at startup.
+- Added a deterministic unit test for the reader respawn lifecycle.
+- Verified: `cargo test --release` (7 tests pass) and `cargo build --release`.

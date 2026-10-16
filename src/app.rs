@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use global_hotkey::HotKeyState;
@@ -8,7 +7,9 @@ use iced::{keyboard, Element, Subscription, Task};
 
 use crate::clicker::{ClickConfig, ClickEngine, ClickTarget};
 use crate::hotkey::{parse_hotkey, HotkeyService};
-use crate::mouse::{spawn_monitor, MouseEvent, MouseTrigger};
+use crate::mouse::{
+    spawn_monitor, MonitorStatus, MouseMonitor, MouseEvent, MouseTrigger,
+};
 use crate::profile::{
     delete_profile, list_profiles, load_profile, profile_file_exists, same_profile_file,
     save_profile, split_interval, ClickPoint, PressMode, Profile, TimeUnit,
@@ -69,7 +70,7 @@ pub struct RsClicker {
     pub(crate) armed: HashMap<String, ArmedProfile>,
     pub(crate) errors: HashMap<String, String>,
     pub(crate) hotkeys: HotkeyService,
-    pub(crate) mouse_rx: Receiver<MouseEvent>,
+    pub(crate) mouse: MouseMonitor,
     pub(crate) interval_value: String,
     pub(crate) interval_unit: TimeUnit,
     pub(crate) fixed_x: String,
@@ -140,7 +141,7 @@ fn new() -> (RsClicker, Task<Message>) {
         armed: HashMap::new(),
         errors: HashMap::new(),
         hotkeys: HotkeyService::new(),
-        mouse_rx: spawn_monitor(),
+        mouse: spawn_monitor(),
         interval_value,
         interval_unit,
         fixed_x: "500".to_string(),
@@ -301,6 +302,10 @@ impl RsClicker {
         };
         let trigger = match p.mouse_trigger {
             Some(button) => {
+                if let MonitorStatus::Unavailable(reason) = self.mouse.status() {
+                    self.status = format!("Mouse triggers unavailable: {reason}");
+                    return;
+                }
                 if self.armed.values().any(|a| {
                     matches!(a.trigger, EffectiveTrigger::Mouse { button: b } if b == button)
                 }) {
@@ -478,7 +483,7 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
             for (id, hk_state) in state.hotkeys.poll_events() {
                 state.route_hotkey(id, hk_state == HotKeyState::Pressed);
             }
-            while let Ok(ev) = state.mouse_rx.try_recv() {
+            while let Ok(ev) = state.mouse.rx.try_recv() {
                 match ev {
                     MouseEvent::Press(button) => {
                         if state.top_modal() == Some(Modal::Capture) {
