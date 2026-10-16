@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::atomic_file::write_atomic;
 use super::model::Profile;
 
 fn profiles_dir() -> Option<PathBuf> {
@@ -48,7 +49,7 @@ pub fn save_profile(profile: &Profile) -> Result<(), String> {
     ensure_dir();
     let path = profile_path(&profile.name).ok_or("config dir unavailable")?;
     let data = serde_json::to_string_pretty(profile).map_err(|e| e.to_string())?;
-    fs::write(path, data).map_err(|e| e.to_string())
+    write_atomic(&path, &data)
 }
 
 pub fn load_profile(name: &str) -> Result<Profile, String> {

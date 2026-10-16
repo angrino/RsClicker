@@ -1,4 +1,5 @@
 mod app;
+mod atomic_file;
 mod clicker;
 mod hotkey;
 mod mouse;

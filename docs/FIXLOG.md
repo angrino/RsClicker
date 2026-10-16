@@ -1,16 +1,17 @@
 # FIXLOG
 
-Working log of the important fixes from each build session. This file is a
-temporary record — it will be rewritten into the final documentation when
-the next release is cut.
+Working log of the important fixes. This file is a temporary record — it
+will be rewritten into the final documentation when the next release is
+cut. All fixes from the current working session land under one session
+heading.
 
 ## Session 1 — 2026-10-16
 
 ### Docs audited
-- `docs/*.md` + `README.md` checked against the code: accurate, with one
-  wording note (a profile rename is a save-new + delete-old, not an atomic
-  move — ARCHITECTURE.md says "moves the file"). Reword in the final doc
-  rewrite.
+- `docs/*.md` + `README.md` checked against the code: accurate, with two
+  wording notes (a profile rename is a save-new + delete-old, not an
+  atomic move, and stop no longer "joins it" — see below). Reword both in
+  the final doc rewrite.
 
 ### Fixed (critical): zombie RUNNING state after a worker panic
 - Symptom: a panic inside the click loop (enigo internals, e.g. the libei
@@ -18,14 +19,11 @@ the next release is cut.
   `true` — the engine showed green "Running" forever, no clicks, no error,
   and the panic hook in `main.rs` swallowed the message.
 - Fix (`src/clicker/engine.rs`): the whole worker body (enigo creation +
-  click loop) is now wrapped in `catch_unwind`; a crash records
+  click loop) is wrapped in `catch_unwind`; a crash records
   `Engine crashed: <message>` in the engine error slot and clears the
   running flag → the UI's per-tick drain surfaces the red ERROR state and
   the profile stays re-armable. Added `panic_message()` helper with unit
   tests.
-- Verified: `cargo test --release` (3 tests pass) and `cargo build --release`.
-
-## Session 2 — 2026-10-16
 
 ### Fixed (critical): UI freeze on stop/start (worker join on the UI thread)
 - Symptom: `ClickEngine::stop()` joined the worker thread inside the iced
@@ -49,11 +47,6 @@ the next release is cut.
 - Accepted trade-offs: a pathological portal hang leaks the worker thread
   (the UI keeps working); a stop→start within one portal-click duration
   can land one in-flight click from the old worker.
-- Verified: `cargo test --release` (4 tests pass) and `cargo build --release`.
-- Doc note: ARCHITECTURE.md still says "stop signals and joins it" — reword
-  in the final doc rewrite.
-
-## Session 3 — 2026-10-16
 
 ### Fixed (critical): silent injection failures (green running, zero clicks)
 - Symptom: every enigo call in `perform_single_click` discarded its result
@@ -72,9 +65,6 @@ the next release is cut.
     the red ERROR state and the profile stays re-armable.
 - Added two deterministic unit tests for the new loop semantics (no enigo
   needed: fail-fast reporting, and stale-generation errors being dropped).
-- Verified: `cargo test --release` (6 tests pass) and `cargo build --release`.
-
-## Session 4 — 2026-10-16
 
 ### Fixed (high): silent mouse-trigger monitor (no feedback, dead readers, no hot-plug)
 - Symptom: `evdev::enumerate()` swallows its own errors (verified from the
@@ -96,4 +86,22 @@ the next release is cut.
     the first-scan `Unknown` window stays allowed; no proactive status
     noise at startup.
 - Added a deterministic unit test for the reader respawn lifecycle.
-- Verified: `cargo test --release` (7 tests pass) and `cargo build --release`.
+
+### Fixed (high): non-atomic file writes (JSON corruption on crash mid-save)
+- Symptom: `save_profile` and `save_settings` used plain `fs::write`
+  (open + truncate + write) — a kill/crash/disk-full mid-write left a
+  truncated JSON file behind permanently (broken profile, or settings
+  silently reset to defaults on load).
+- Fix: new `src/atomic_file.rs` — `write_atomic(path, data)` writes a
+  `.tmp` sibling, flushes (`sync_all`), then atomically renames over the
+  target (POSIX semantics; `MOVEFILE_REPLACE_EXISTING` on Windows; file
+  closed before rename). Both savers use it. Leftover `.tmp` files from a
+  crash are invisible to the profile listing and overwritten by the next
+  save.
+- Added unit tests: replace-existing content and stale-tmp resilience.
+- Accepted limit: full power-loss durability (directory fsync) is out of
+  scope; the threat model is process kill / crash / disk-full.
+
+### Session verification
+- `cargo test --release`: 9 tests pass (7 earlier + 2 atomic-file).
+- `cargo build --release`: clean.

@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::atomic_file::write_atomic;
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{Accent, AppTheme, BaseTheme, ViewMode};
@@ -60,5 +61,5 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let data = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(path, data).map_err(|e| e.to_string())
+    write_atomic(&path, &data)
 }
