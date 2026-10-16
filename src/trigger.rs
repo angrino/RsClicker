@@ -61,6 +61,29 @@ pub fn trigger_label(p: &Profile) -> String {
     }
 }
 
+/// True when the armed snapshot still matches the profile as it is defined
+/// right now: same trigger (for hotkeys, the same *parsed* hotkey — a
+/// profile whose hotkey became unparseable never matches), same press mode
+/// and the same click config. Used to decide whether saving an armed
+/// profile needs a live resync.
+pub fn armed_matches_profile(armed: &ArmedProfile, p: &Profile) -> bool {
+    let trigger_matches = match &armed.trigger {
+        EffectiveTrigger::Mouse { button } => p.mouse_trigger == Some(*button),
+        EffectiveTrigger::Hotkey { id, .. } => {
+            p.mouse_trigger.is_none()
+                && parse_hotkey(&p.trigger_hotkey)
+                    .map(|hotkey| hotkey.id() == *id)
+                    .unwrap_or(false)
+        }
+    };
+    trigger_matches
+        && armed.press_mode == p.press_mode
+        && match profile_config(p) {
+            Ok(config) => config == armed.config,
+            Err(_) => false,
+        }
+}
+
 pub enum Capture {
     Hotkey(String),
     Mouse(MouseTrigger),
@@ -102,5 +125,89 @@ pub fn capture_hotkey(key: &Key, modifiers: &keyboard::Modifiers) -> Capture {
     match parse_hotkey(&text) {
         Ok(_) => Capture::Hotkey(text),
         Err(_) => Capture::Unsupported,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clicker::MouseButtonKind;
+
+    fn armed_for(p: &Profile) -> ArmedProfile {
+        ArmedProfile {
+            config: profile_config(p).unwrap(),
+            trigger: match p.mouse_trigger {
+                Some(button) => EffectiveTrigger::Mouse { button },
+                None => {
+                    let hotkey = parse_hotkey(&p.trigger_hotkey).unwrap();
+                    EffectiveTrigger::Hotkey {
+                        id: hotkey.id(),
+                        key: hotkey,
+                    }
+                }
+            },
+            press_mode: p.press_mode,
+        }
+    }
+
+    #[test]
+    fn matching_snapshot_matches() {
+        let p = Profile::default();
+        let armed = armed_for(&p);
+        assert!(armed_matches_profile(&armed, &p));
+    }
+
+    #[test]
+    fn edits_break_the_match() {
+        let base = Profile::default();
+        let armed = armed_for(&base);
+
+        let interval_edit = Profile {
+            interval_ms: base.interval_ms + 1,
+            ..base.clone()
+        };
+        assert!(!armed_matches_profile(&armed, &interval_edit));
+
+        let hotkey_edit = Profile {
+            trigger_hotkey: "F7".to_string(),
+            ..base.clone()
+        };
+        assert!(!armed_matches_profile(&armed, &hotkey_edit));
+
+        let press_edit = Profile {
+            press_mode: PressMode::Hold,
+            ..base.clone()
+        };
+        assert!(!armed_matches_profile(&armed, &press_edit));
+
+        let button_edit = Profile {
+            button: MouseButtonKind::Right,
+            ..base.clone()
+        };
+        assert!(!armed_matches_profile(&armed, &button_edit));
+
+        let trigger_button_edit = Profile {
+            mouse_trigger: Some(MouseTrigger::Side),
+            ..base.clone()
+        };
+        assert!(!armed_matches_profile(&armed, &trigger_button_edit));
+    }
+
+    #[test]
+    fn unusable_states_never_match() {
+        let base = Profile::default();
+        let armed = armed_for(&base);
+
+        let unparseable = Profile {
+            trigger_hotkey: "not a hotkey!".to_string(),
+            ..base.clone()
+        };
+        assert!(!armed_matches_profile(&armed, &unparseable));
+
+        let empty_sequence = Profile {
+            target: ClickTarget::Sequence(Vec::new()),
+            ..base.clone()
+        };
+        assert!(!armed_matches_profile(&armed, &empty_sequence));
     }
 }

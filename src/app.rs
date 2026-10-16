@@ -17,8 +17,8 @@ use crate::profile::{
 use crate::settings_store::{load_settings, save_settings, AppSettings};
 use crate::theme::{Accent, BaseTheme, ViewMode};
 use crate::trigger::{
-    capture_hotkey, profile_config, trigger_label, ArmedProfile, Capture, EffectiveTrigger,
-    RunState,
+    armed_matches_profile, capture_hotkey, profile_config, trigger_label, ArmedProfile, Capture,
+    EffectiveTrigger, RunState,
 };
 use crate::views::{self};
 
@@ -300,44 +300,11 @@ impl RsClicker {
                 return;
             }
         };
-        let trigger = match p.mouse_trigger {
-            Some(button) => {
-                if let MonitorStatus::Unavailable(reason) = self.mouse.status() {
-                    self.status = format!("Mouse triggers unavailable: {reason}");
-                    return;
-                }
-                if self.armed.values().any(|a| {
-                    matches!(a.trigger, EffectiveTrigger::Mouse { button: b } if b == button)
-                }) {
-                    self.status = format!("{button} is already armed by another profile.");
-                    return;
-                }
-                EffectiveTrigger::Mouse { button }
-            }
-            None => {
-                let hotkey = match parse_hotkey(&p.trigger_hotkey) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        self.status = format!("Hotkey error: {e}");
-                        return;
-                    }
-                };
-                if self.armed.values().any(|a| {
-                    matches!(a.trigger, EffectiveTrigger::Hotkey { id: hid, .. } if hid == hotkey.id())
-                }) {
-                    self.status = "This hotkey is already armed by another profile.".to_string();
-                    return;
-                }
-                match self.hotkeys.register_hotkey(hotkey) {
-                    Ok(()) => EffectiveTrigger::Hotkey {
-                        id: hotkey.id(),
-                        key: hotkey,
-                    },
-                    Err(e) => {
-                        self.status = format!("Hotkey error: {e}");
-                        return;
-                    }
-                }
+        let trigger = match self.resolve_effective_trigger(&p) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = e;
+                return;
             }
         };
         let press_mode = p.press_mode;
@@ -352,6 +319,95 @@ impl RsClicker {
             },
         );
         self.status = format!("Listening — press {label} ({})", press_mode.label());
+    }
+
+    /// Resolve a profile's effective trigger against the mouse monitor, the
+    /// armed set and the hotkey backend. The returned `Err` strings are the
+    /// same user-visible reasons the old inline arming code produced.
+    fn resolve_effective_trigger(&mut self, p: &Profile) -> Result<EffectiveTrigger, String> {
+        if let Some(button) = p.mouse_trigger {
+            if let MonitorStatus::Unavailable(reason) = self.mouse.status() {
+                return Err(format!("Mouse triggers unavailable: {reason}"));
+            }
+            if self.armed.values().any(|a| {
+                matches!(a.trigger, EffectiveTrigger::Mouse { button: b } if b == button)
+            }) {
+                return Err(format!("{button} is already armed by another profile."));
+            }
+            return Ok(EffectiveTrigger::Mouse { button });
+        }
+        let hotkey = parse_hotkey(&p.trigger_hotkey).map_err(|e| format!("Hotkey error: {e}"))?;
+        if self.armed.values().any(|a| {
+            matches!(a.trigger, EffectiveTrigger::Hotkey { id: hid, .. } if hid == hotkey.id())
+        }) {
+            return Err("This hotkey is already armed by another profile.".to_string());
+        }
+        self.hotkeys
+            .register_hotkey(hotkey)
+            .map_err(|e| format!("Hotkey error: {e}"))?;
+        Ok(EffectiveTrigger::Hotkey {
+            id: hotkey.id(),
+            key: hotkey,
+        })
+    }
+
+    /// Live resync of the armed/running state after a successful save:
+    /// a matching snapshot is left untouched; anything else is rebuilt —
+    /// the trigger is re-registered (possibly a new one), a running engine
+    /// restarts with the new config, and a rename carries the state to the
+    /// new key. A failed rebuild falls back to Idle with the reason shown.
+    fn resync_after_save(&mut self, old: &str, new: &str) {
+        let Some(armed) = self.armed.get(old).cloned() else {
+            if old != new {
+                self.engines.remove(old);
+                self.errors.remove(old);
+            }
+            self.status = format!("Saved {new}");
+            return;
+        };
+        if old == new && armed_matches_profile(&armed, &self.profile) {
+            self.status = format!("Saved {new}");
+            return;
+        }
+        let was_running = self
+            .engines
+            .get(old)
+            .map(|engine| engine.is_running())
+            .unwrap_or(false);
+        self.armed.remove(old);
+        if let EffectiveTrigger::Hotkey { key, .. } = &armed.trigger {
+            self.hotkeys.unregister_key(key.clone());
+        }
+        self.engines.remove(old);
+        self.errors.remove(old);
+
+        let profile = self.profile.clone();
+        let outcome = match self.resolve_effective_trigger(&profile) {
+            Ok(trigger) => profile_config(&profile)
+                .map(|config| (trigger, config))
+                .map_err(|e| e.to_string()),
+            Err(reason) => Err(reason),
+        };
+        match outcome {
+            Ok((trigger, config)) => {
+                self.armed.insert(
+                    new.to_string(),
+                    ArmedProfile {
+                        config: config.clone(),
+                        trigger,
+                        press_mode: profile.press_mode,
+                    },
+                );
+                if was_running {
+                    self.start_engine(new, config);
+                }
+                self.status = format!("Saved {new} — armed state updated.");
+            }
+            Err(reason) => {
+                self.engines.remove(new);
+                self.status = format!("Saved {new}. Disarmed: {reason}");
+            }
+        }
     }
 
     /// Fires a trigger edge for one profile: `pressed=true` on press,
@@ -667,16 +723,13 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
                     match save_profile(&state.profile) {
                         Ok(()) => {
                             if new_name != old {
-                                // Renaming orphans the old file: remove it and
-                                // drop any live state bound to the old name.
-                                state.disarm(&old);
-                                state.engines.remove(&old);
-                                state.errors.remove(&old);
+                                // Renaming orphans the old file; live state
+                                // is carried over by the resync step.
                                 let _ = delete_profile(&old);
                                 state.editing_name = Some(new_name.clone());
                             }
+                            state.resync_after_save(&old, &new_name);
                             state.profiles = list_profiles();
-                            state.status = format!("Saved {new_name}");
                         }
                         Err(e) => state.status = format!("Save failed: {e}"),
                     }

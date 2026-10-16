@@ -120,7 +120,35 @@ heading.
   Linux (rare) stay listed but fail to load — consequence of the
   universal rule.
 
+### Fixed (high): stale armed state after saving edits
+- Symptom: `ArmedProfile` was a snapshot taken at arm time (config,
+  trigger, press mode). Editing and saving an armed profile updated the
+  file while the old trigger kept routing — e.g. changing F6 to F7 and
+  saving still left F6 firing, and interval/press-mode/points edits were
+  invisible to the live engine.
+- Fix (live-resync, as agreed): armed matching state is preserved
+  silently; anything else is rebuilt after the save.
+  - `src/trigger.rs`: `armed_matches_profile` — pure comparison of the
+    armed snapshot against the profile (same trigger id — hotkeys are
+    re-parsed, so an unparseable edit never matches — plus press mode and
+    click config, where an unusable config never matches).
+  - `src/app.rs`: arming resolution is factored into
+    `resolve_effective_trigger` (monitor gate, duplicate checks,
+    registration — identical user-visible reason strings), and
+    `resync_after_save` runs after a successful save: unchanged state is
+    left untouched ("Saved <name>"), a changed armed profile is rebuilt
+    (trigger re-registered, running engine restarted with the new
+    config, "Saved <name> — armed state updated.") and renames carry the
+    armed state under the new key. A failed rebuild (conflicting
+    trigger, unusable hotkey, empty sequence, missing monitor) cleans up
+    to Idle and reports the reason: "Saved <name>. Disarmed: <reason>".
+- Manual Start/Stop engines from the editor keep their explicit snapshot
+  semantics (unchanged by design).
+- Unit tests: snapshot equality + edit matrix (interval, hotkey, press
+  mode, click button, trigger button) + unusable-state matrix
+  (unparseable hotkey, empty sequence) for `armed_matches_profile`.
+
 ### Session verification
-- `cargo test --release`: 12 tests pass (engine 6, mouse monitor 1,
-  atomic-file 2, reserved names 3).
+- `cargo test --release`: 15 tests pass (engine 6, mouse monitor 1,
+  atomic-file 2, reserved names 3, trigger resync 3).
 - `cargo build --release`: clean.
