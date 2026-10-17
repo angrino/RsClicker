@@ -8,7 +8,7 @@ use iced::{keyboard, Element, Subscription, Task};
 use crate::clicker::{ClickConfig, ClickEngine, ClickTarget};
 use crate::hotkey::{parse_hotkey, HotkeyService};
 use crate::mouse::{
-    spawn_monitor, MonitorStatus, MouseMonitor, MouseEvent, MouseTrigger,
+    filter_injected_pairs, spawn_monitor, MonitorStatus, MouseMonitor, MouseEvent, MouseTrigger,
 };
 use crate::profile::{
     delete_profile, list_profiles, load_profile, profile_file_exists, same_profile_file,
@@ -539,16 +539,23 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
             for (id, hk_state) in state.hotkeys.poll_events() {
                 state.route_hotkey(id, hk_state == HotKeyState::Pressed);
             }
+            // Injected click pairs are dropped wholesale before routing or
+            // capture so a profile's own clicks can never re-trigger it, and
+            // a running engine cannot pollute a concurrent capture session.
+            let mut batch = Vec::new();
             while let Ok(ev) = state.mouse.rx.try_recv() {
+                batch.push(ev);
+            }
+            for ev in filter_injected_pairs(batch) {
                 match ev {
-                    MouseEvent::Press(button) => {
+                    MouseEvent::Press(button, _) => {
                         if state.top_modal() == Some(Modal::Capture) {
                             state.record_capture(Capture::Mouse(button));
                         } else {
                             state.route_mouse(button, true);
                         }
                     }
-                    MouseEvent::Release(button) => {
+                    MouseEvent::Release(button, _) => {
                         if state.top_modal() != Some(Modal::Capture) {
                             state.route_mouse(button, false);
                         }

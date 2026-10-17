@@ -7,11 +7,12 @@
 //! - Windows 10/11: low-level mouse hook via rdev (no extra setup).
 //! - Other platforms: stub that never yields events.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_os = "linux")]
-use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
@@ -20,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 
 /// A mouse button usable as a profile trigger, including side buttons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MouseTrigger {
     Left,
     Right,
@@ -41,10 +42,14 @@ impl std::fmt::Display for MouseTrigger {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// A mouse-button edge as seen by the global monitor: `pressed` plus the
+/// device timestamp in millis since the UNIX epoch (drivers/OS event time,
+/// NOT processing time — needed to recognize injected press→release pairs
+/// by their near-zero gap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEvent {
-    Press(MouseTrigger),
-    Release(MouseTrigger),
+    Press(MouseTrigger, u64),
+    Release(MouseTrigger, u64),
 }
 
 /// Health of the trigger monitor, checked when arming a mouse-trigger
@@ -71,6 +76,62 @@ impl MouseMonitor {
             .map(|s| s.clone())
             .unwrap_or(MonitorStatus::Unknown)
     }
+}
+
+fn epoch_ms(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Same-button press→release pairs closer than this are treated as
+/// injected clicks and dropped wholesale. SendInput pairs reach a
+/// low-level hook ≤ ~2 ms apart (there is no LLMHF_INJECTED flag in rdev)
+/// and evdev pairs share a timeval, while the fastest physical release
+/// stays far above this bound.
+pub const PAIR_EPS_MS: u64 = 20;
+
+/// Removes injected click pairs from a monitor batch in arrival order.
+/// A release exactly cancels its latest unmatched press of the same button
+/// when the device-timestamp gap is within `PAIR_EPS_MS`; unpaired presses
+/// (held buttons) and slower pairs route untouched. Both edges are dropped
+/// together so toggle/stop logic never sees self-injected input.
+pub fn filter_injected_pairs(events: Vec<MouseEvent>) -> Vec<MouseEvent> {
+    let mut keep = vec![true; events.len()];
+    let mut last_press: HashMap<MouseTrigger, usize> = HashMap::new();
+    for (i, ev) in events.iter().enumerate() {
+        match *ev {
+            MouseEvent::Press(button, _) => {
+                last_press.insert(button, i);
+            }
+            MouseEvent::Release(button, ts) => {
+                let matched = last_press
+                    .get(&button)
+                    .copied()
+                    .and_then(|pi| match events[pi] {
+                        MouseEvent::Press(_, press_ts) => {
+                            if ts >= press_ts && ts - press_ts <= PAIR_EPS_MS {
+                                Some(pi)
+                            } else {
+                                None
+                            }
+                        }
+                        MouseEvent::Release(..) => None,
+                    });
+                if let Some(pi) = matched {
+                    keep[i] = false;
+                    keep[pi] = false;
+                    last_press.remove(&button);
+                }
+            }
+        }
+    }
+    events
+        .into_iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(ev, _)| ev)
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -156,13 +217,14 @@ pub fn spawn_monitor() -> MouseMonitor {
                                             if ev.event_type() != evdev::EventType::KEY {
                                                 continue;
                                             }
+                                            let ts = epoch_ms(ev.timestamp());
                                             let trigger = match code_to_trigger(ev.code()) {
                                                 Some(t) => t,
                                                 None => continue,
                                             };
                                             let msg = match ev.value() {
-                                                1 => MouseEvent::Press(trigger),
-                                                0 => MouseEvent::Release(trigger),
+                                                1 => MouseEvent::Press(trigger, ts),
+                                                0 => MouseEvent::Release(trigger, ts),
                                                 _ => continue,
                                             };
                                             if tx.send(msg).is_err() {
@@ -222,6 +284,7 @@ pub fn spawn_monitor() -> MouseMonitor {
             let status = status_for_hook;
             *status.lock().unwrap_or_else(|p| p.into_inner()) = MonitorStatus::Running(1);
             match rdev::listen(move |event| {
+                let ts = epoch_ms(event.time);
                 let (trigger, pressed) = match event.event_type {
                     rdev::EventType::ButtonPress(b) => (map_button(b), true),
                     rdev::EventType::ButtonRelease(b) => (map_button(b), false),
@@ -229,9 +292,9 @@ pub fn spawn_monitor() -> MouseMonitor {
                 };
                 if let Some(t) = trigger {
                     let _ = tx.send(if pressed {
-                        MouseEvent::Press(t)
+                        MouseEvent::Press(t, ts)
                     } else {
-                        MouseEvent::Release(t)
+                        MouseEvent::Release(t, ts)
                     });
                 }
             }) {
@@ -254,6 +317,138 @@ pub fn spawn_monitor() -> MouseMonitor {
         "mouse triggers unsupported on this platform".to_string(),
     )));
     MouseMonitor { rx, status }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::{filter_injected_pairs, MouseEvent, MouseTrigger, PAIR_EPS_MS};
+
+    /// (button, pressed) projection of a monitor batch, order preserved.
+    fn project(events: &[MouseEvent]) -> Vec<(MouseTrigger, bool)> {
+        events
+            .iter()
+            .map(|ev| match *ev {
+                MouseEvent::Press(b, _) => (b, true),
+                MouseEvent::Release(b, _) => (b, false),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn eps_bound_is_documented_size() {
+        assert_eq!(PAIR_EPS_MS, 20);
+    }
+
+    #[test]
+    fn instant_pair_dropped() {
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Press(MouseTrigger::Side, 1_000),
+            MouseEvent::Release(MouseTrigger::Side, 1_002),
+        ]);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn double_click_pairs_dropped() {
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Press(MouseTrigger::Left, 1_000),
+            MouseEvent::Release(MouseTrigger::Left, 1_001),
+            MouseEvent::Press(MouseTrigger::Left, 1_010),
+            MouseEvent::Release(MouseTrigger::Left, 1_012),
+        ]);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn slow_pair_survives() {
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Press(MouseTrigger::Left, 1_000),
+            MouseEvent::Release(MouseTrigger::Left, 1_000 + super::PAIR_EPS_MS + 1),
+        ]);
+        assert_eq!(
+            project(&filtered),
+            vec![(MouseTrigger::Left, true), (MouseTrigger::Left, false)]
+        );
+    }
+
+    #[test]
+    fn release_before_press_never_pairs() {
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Release(MouseTrigger::Left, 1_000),
+            MouseEvent::Press(MouseTrigger::Left, 1_003),
+        ]);
+        assert_eq!(
+            project(&filtered),
+            vec![(MouseTrigger::Left, false), (MouseTrigger::Left, true)]
+        );
+    }
+
+    #[test]
+    fn stale_long_press_not_broken_by_late_release() {
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Press(MouseTrigger::Side, 1_000),
+            MouseEvent::Release(MouseTrigger::Side, 3_000),
+        ]);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn unpaired_held_press_survives() {
+        let filtered = filter_injected_pairs(vec![MouseEvent::Press(MouseTrigger::Extra, 1_000)]);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn buttons_independent_and_order_kept() {
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Press(MouseTrigger::Extra, 1_000),
+            MouseEvent::Press(MouseTrigger::Side, 1_001),
+            MouseEvent::Release(MouseTrigger::Side, 1_002),
+            MouseEvent::Release(MouseTrigger::Extra, 5_000),
+        ]);
+        assert_eq!(
+            project(&filtered),
+            vec![
+                (MouseTrigger::Extra, true),
+                (MouseTrigger::Extra, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn injected_pair_between_held_presses_does_not_pair_wrong_edges() {
+        // Hardware setup: Extra held (user press, no release yet) while the
+        // engine injects a Side pair; each button only pairs with itself.
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Press(MouseTrigger::Extra, 1_000),
+            MouseEvent::Press(MouseTrigger::Side, 1_500),
+            MouseEvent::Release(MouseTrigger::Side, 1_501),
+        ]);
+        assert_eq!(
+            project(&filtered),
+            vec![(MouseTrigger::Extra, true)]
+        );
+    }
+
+    #[test]
+    fn second_pair_after_held_release() {
+        // A long-standing press must not absorb a later fast pair: the
+        // release first completes the slow pair (no match), the next pair
+        // after a new press is still recognized.
+        let filtered = filter_injected_pairs(vec![
+            MouseEvent::Press(MouseTrigger::Side, 1_000),
+            MouseEvent::Release(MouseTrigger::Side, 2_000),
+            MouseEvent::Press(MouseTrigger::Side, 2_100),
+            MouseEvent::Release(MouseTrigger::Side, 2_101),
+        ]);
+        assert_eq!(
+            project(&filtered),
+            vec![
+                (MouseTrigger::Side, true),
+                (MouseTrigger::Side, false),
+            ]
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

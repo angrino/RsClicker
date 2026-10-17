@@ -2,8 +2,7 @@
 
 Working log of the important fixes. This file is a temporary record — it
 will be rewritten into the final documentation when the next release is
-cut. All fixes from the current working session land under one session
-heading.
+cut. Each session's fixes land under one dated session heading.
 
 ## Session 1 — 2026-10-16
 
@@ -152,3 +151,51 @@ heading.
 - `cargo test --release`: 15 tests pass (engine 6, mouse monitor 1,
   atomic-file 2, reserved names 3, trigger resync 3).
 - `cargo build --release`: clean.
+
+## Session 2 — 2026-10-17
+
+### Fixed (high): self-trigger feedback loop when the trigger button equals the click button
+- Symptom: a profile armed with a mouse trigger identical to its click
+  button was destroyed by its own clicks. On Windows the rdev hook is a
+  `WH_MOUSE_LL` low-level hook, which receives the app's own injected
+  `SendInput` clicks like any real input (rdev does not expose
+  `LLMHF_INJECTED`), so: **Toggle** stopped the engine at the first
+  injected click (the injected *press* edge toggled it off) and **Hold**
+  stopped it instantly (the injected *release* edge arrived while the
+  trigger was held). One click, then dead — or a stop/start feedback
+  flicker at rapid intervals. Linux XTEST/libei injection never re-enters
+  `/dev/input`, so no live Linux loop exists today; the fix is still
+  cross-platform and future-proofs any uinput-style Linux backend
+  (e.g. a re-added enigo `wayland` feature).
+- Fix (`src/mouse.rs`, drain in `src/app.rs`):
+  - `MouseEvent::Press/Release` now carry the device timestamp (millis
+    since the UNIX epoch): evdev uses `InputEvent::timestamp()` (same
+    timeval for a click's press+release), rdev uses the per-event
+    `Event.time = SystemTime::now()` stamped inside the hook callback.
+  - New pure function `filter_injected_pairs`: a same-button
+    press→release pair with a gap ≤ `PAIR_EPS_MS` (20 ms) is an injected
+    click fingerprint — SendInput pairs land ≤ ~2 ms apart, evdev pairs
+    share a timeval, while the fastest physical release stays far above
+    the bound. Both edges are dropped together — a release only cancels
+    its latest *unmatched* press, so held-button semantics still route
+    normally.
+  - The Tick handler drains the monitor channel into a batch, filters,
+    then routes/captures the survivors — so self-injected clicks can
+    never re-trigger an armed profile, and a running engine cannot pollute
+    a concurrent Capture session.
+- Accepted edge: a physical release within 20 ms of its press (jitter
+  clickers/fast macros) is indistinguishable from injection and is
+  dropped too; split pairs across two drain batches are theoretically
+  possible but practically impossible for near-instant injection pairs.
+- Added 10 portable unit tests (`mouse::filter_tests`): instant pair,
+  double-click pairs, slow pair survives, release-before-press never
+  pairs, stale long press intact, unpaired held press, cross-button
+  independence + ordering, held press with concurrent other-button pair,
+  and slow pair followed by a fast pair.
+
+### Session verification
+- `cargo test --release`: 25 tests pass (engine 6, mouse monitor 1 +
+  pair filter 10, atomic-file 2, reserved names 3, trigger resync 3).
+- `cargo build --release`: clean.
+- `cargo check --target x86_64-pc-windows-gnu --release`: clean (rdev
+  branch compiled).
