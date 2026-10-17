@@ -64,9 +64,14 @@ impl Default for ClickConfig {
     }
 }
 
+/// Upper bound for a configured click interval (1 hour). The UI rejects
+/// larger values and the engine clamps anyway — a stored profile can never
+/// carry an absurd interval.
+pub const MAX_INTERVAL_MS: u64 = 3_600_000;
+
 impl ClickConfig {
     pub fn sanitized_interval_ms(&self) -> u64 {
-        self.interval_ms.clamp(1, 3_600_000)
+        self.interval_ms.clamp(1, MAX_INTERVAL_MS)
     }
 }
 

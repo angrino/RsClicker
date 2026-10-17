@@ -72,7 +72,10 @@ impl ClickEngine {
 
     /// Returns and clears a pending start error, if the worker reported one.
     pub fn take_error(&self) -> Option<String> {
-        self.error.lock().ok()?.take()
+        self.error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     pub fn start(&mut self, config: ClickConfig) {

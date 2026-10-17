@@ -23,11 +23,6 @@ impl HotkeyService {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn available(&self) -> bool {
-        self.manager.is_some()
-    }
-
     pub fn register_hotkey(&mut self, hotkey: HotKey) -> Result<(), String> {
         match &self.manager {
             Some(manager) => {

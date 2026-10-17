@@ -193,9 +193,41 @@ cut. Each session's fixes land under one dated session heading.
   independence + ordering, held press with concurrent other-button pair,
   and slow pair followed by a fast pair.
 
+### Minor batch: poisoned-mutex consistency + cosmetic leftovers (#11)
+- `ClickEngine::take_error()` now opens its slot with
+  `unwrap_or_else(|e| e.into_inner())` (was `lock().ok()?`), matching the
+  rest of the codebase — a poisoned slot no longer drops a pending error.
+  `MouseMonitor::status()` got the same unlock-on-poison style instead of
+  silently falling back to `Unknown`.
+- Dead code removed: `hotkey/binding.rs` keeps only `parse_hotkey`
+  (`describe_modifiers`, `example_keys`, `default_toggle`,
+  `hotkey_to_string` deleted together with their `#[allow(dead_code)]`
+  markers), and `HotkeyService::available()` is gone.
+- `Message::Stop` no longer overwrites the status unconditionally: it
+  stamps "Stopped." only when the engine was actually running.
+- `new()` no longer swallows a corrupt default profile: a missing
+  `default.json` stays the normal first-run path, but a present file
+  that fails to parse shows "default profile failed to load: …" at
+  startup (built-in defaults are used meanwhile).
+- Renaming a profile surfaces a failed delete of the old file instead of
+  silently orphaning it: "Saved <new> (old file kept: <reason>)".
+- ApplySettings keeps the user's in-session choice on a failed save and
+  says so ("Settings kept in memory — save failed: …").
+- Interval input: `MAX_INTERVAL_MS = 3_600_000` is now the single shared
+  bound (used by `ClickConfig::sanitized_interval_ms` and the UI). New
+  pure `resolve_interval` replaces the open-coded parsing: empty input
+  means "no change", tiny positives still clamp to 1 ms, and values above
+  60 minutes are **rejected** with "Interval too large — maximum is
+  60 min" while the previous value stays — `"1e300"` can no longer store
+  `u64::MAX` into a profile file. 6 unit tests added.
+- The `engines` map can no longer grow unbounded: `drain_engine_errors`
+  retains only running engines and prunes idle ones (an engine that just
+  reported an error is surfaced first and pruned on the next tick). Since
+  state colors derive from the `errors` and `armed` maps, nothing
+  user-visible changes.
+
 ### Session verification
-- `cargo test --release`: 25 tests pass (engine 6, mouse monitor 1 +
-  pair filter 10, atomic-file 2, reserved names 3, trigger resync 3).
+- `cargo test --release`: 31 tests pass (engine 6, mouse 11, atomic-file
+  2, reserved names 3, trigger resync 3, interval 6).
 - `cargo build --release`: clean.
-- `cargo check --target x86_64-pc-windows-gnu --release`: clean (rdev
-  branch compiled).
+- `cargo check --target x86_64-pc-windows-gnu --release`: clean.

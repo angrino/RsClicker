@@ -5,7 +5,9 @@ use global_hotkey::HotKeyState;
 use iced::widget::{opaque, stack};
 use iced::{keyboard, Element, Subscription, Task};
 
-use crate::clicker::{ClickConfig, ClickEngine, ClickTarget};
+use crate::clicker::{
+    ClickConfig, ClickEngine, ClickTarget, MAX_INTERVAL_MS,
+};
 use crate::hotkey::{parse_hotkey, HotkeyService};
 use crate::mouse::{
     filter_injected_pairs, spawn_monitor, MonitorStatus, MouseMonitor, MouseEvent, MouseTrigger,
@@ -28,6 +30,44 @@ use crate::views::{self};
 pub(crate) const VERSION: &str = "26.10.15";
 pub(crate) const REPO: &str = "https://github.com/voidx9x/RsClicker";
 pub(crate) const SPLASH_TICKS: u32 = 44; // ~2.2s at 50ms per tick
+
+/// UI interval entry: trimmed text × unit multiplier → millis.
+/// `Ok(None)` = empty input, "no change"; `Err` = keep the previous value.
+pub(crate) fn resolve_interval(raw: &str, mult: u64) -> Result<Option<u64>, &'static str> {
+    let raw = raw.trim().replace(',', ".");
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match raw.parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => {
+            let ms = (v * mult as f64).round() as u64;
+            if ms == 0 {
+                Ok(Some(1))
+            } else if ms > MAX_INTERVAL_MS {
+                Err("Interval too large — maximum is 60 min")
+            } else {
+                Ok(Some(ms))
+            }
+        }
+        _ => Err("Invalid interval"),
+    }
+}
+
+/// Loads the on-disk default profile for startup. A missing file is normal
+/// (first run → built-in defaults); a present-but-broken file is surfaced
+/// as a warning instead of silently being replaced by defaults.
+fn load_default_profile() -> (Profile, Option<String>) {
+    if !profile_file_exists("default") {
+        return (Profile::default(), None);
+    }
+    match load_profile("default") {
+        Ok(p) => (p, None),
+        Err(e) => (
+            Profile::default(),
+            Some(format!("default profile failed to load: {e}")),
+        ),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Screen {
@@ -124,7 +164,7 @@ pub enum Message {
 
 fn new() -> (RsClicker, Task<Message>) {
     let settings = load_settings();
-    let loaded = load_profile("default").unwrap_or_default();
+    let (loaded, default_warning) = load_default_profile();
     let (interval_value, interval_unit) = split_interval(loaded.interval_ms);
     let mut app = RsClicker {
         screen: Screen::Splash,
@@ -149,7 +189,7 @@ fn new() -> (RsClicker, Task<Message>) {
         point_x: "500".to_string(),
         point_y: "300".to_string(),
         profiles: list_profiles(),
-        status: "Ready".to_string(),
+        status: default_warning.unwrap_or_else(|| "Ready".to_string()),
     };
     app.refresh_fixed_inputs();
     app.apply_view();
@@ -206,16 +246,10 @@ impl RsClicker {
     }
 
     fn sync_interval(&mut self) {
-        let raw = self.interval_value.trim().replace(',', ".");
-        if raw.is_empty() {
-            return;
-        }
-        match raw.parse::<f64>() {
-            Ok(v) if v.is_finite() && v > 0.0 => {
-                let ms = (v * self.interval_unit.mult() as f64).round() as u64;
-                self.profile.interval_ms = ms.max(1);
-            }
-            _ => self.status = format!("Invalid interval: {}", self.interval_value),
+        match resolve_interval(&self.interval_value, self.interval_unit.mult()) {
+            Ok(Some(ms)) => self.profile.interval_ms = ms,
+            Ok(None) => {}
+            Err(reason) => self.status = format!("{reason}: {}", self.interval_value),
         }
     }
 
@@ -484,14 +518,20 @@ impl RsClicker {
     }
 
     /// Surfaces worker-thread backend failures (e.g. enigo panics caught in
-    /// the engine) as per-profile ERROR states.
+    /// the engine) as per-profile ERROR states, and prunes idle engine
+    /// entries so the map cannot grow unbounded (state display derives from
+    /// the `errors` and `armed` maps, so removal is invisible there).
     fn drain_engine_errors(&mut self) {
         let mut failed = Vec::new();
-        for (name, engine) in self.engines.iter() {
-            if let Some(err) = engine.take_error() {
+        self.engines.retain(|name, engine| match engine.take_error() {
+            Some(err) => {
+                // Keep the engine for one tick so an error surfaced now is
+                // never lost to pruning in the same pass.
                 failed.push((name.clone(), err));
+                true
             }
-        }
+            None => engine.is_running(),
+        });
         for (name, err) in failed {
             self.errors.insert(name.clone(), err.clone());
             self.status = format!("{name}: {err}");
@@ -631,7 +671,9 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
         Message::ApplySettings => {
             state.settings = state.pending_settings;
             if let Err(e) = save_settings(&state.settings) {
-                state.status = format!("Settings save failed: {e}");
+                // In-session choice intentionally survives a failed write;
+                // the status line reports the disk problem.
+                state.status = format!("Settings kept in memory — save failed: {e}");
             }
             state.modal.pop();
         }
@@ -729,13 +771,22 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
                 } else {
                     match save_profile(&state.profile) {
                         Ok(()) => {
+                            let mut rename_note = String::new();
                             if new_name != old {
-                                // Renaming orphans the old file; live state
-                                // is carried over by the resync step.
-                                let _ = delete_profile(&old);
+                                // Renaming is save-new + delete-old; live
+                                // state is carried over by the resync step.
+                                // A failed delete leaves the old file behind
+                                // — surfaced, never silently orphaned.
+                                rename_note = match delete_profile(&old) {
+                                    Ok(()) => String::new(),
+                                    Err(e) => format!(" (old file kept: {e})"),
+                                };
                                 state.editing_name = Some(new_name.clone());
                             }
                             state.resync_after_save(&old, &new_name);
+                            if !rename_note.is_empty() {
+                                state.status.push_str(&rename_note);
+                            }
                             state.profiles = list_profiles();
                         }
                         Err(e) => state.status = format!("Save failed: {e}"),
@@ -752,8 +803,15 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
         }
         Message::Stop => {
             let key = state.editor_key();
+            let was_running = state
+                .engines
+                .get(&key)
+                .map(|engine| engine.is_running())
+                .unwrap_or(false);
             state.stop_engine(&key);
-            state.status = "Stopped.".to_string();
+            if was_running {
+                state.status = "Stopped.".to_string();
+            }
         }
     }
     Task::none()
@@ -818,5 +876,49 @@ fn view(state: &RsClicker) -> Element<'_, Message> {
             )),
         ])
         .into(),
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::resolve_interval;
+    use crate::clicker::MAX_INTERVAL_MS;
+
+    #[test]
+    fn parses_units_via_mult() {
+        assert_eq!(resolve_interval("100", 1).unwrap(), Some(100));
+        assert_eq!(resolve_interval(" 0,7 ", 1_000).unwrap(), Some(700));
+        assert_eq!(resolve_interval("2", 60_000).unwrap(), Some(120_000));
+    }
+
+    #[test]
+    fn empty_means_no_change() {
+        assert_eq!(resolve_interval("", 1).unwrap(), None);
+        assert_eq!(resolve_interval("   ", 1_000).unwrap(), None);
+    }
+
+    #[test]
+    fn tiny_positive_clamps_to_one_ms() {
+        assert_eq!(resolve_interval("0.0005", 1).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn maximum_interval_allowed() {
+        assert_eq!(resolve_interval("60", 60_000).unwrap(), Some(MAX_INTERVAL_MS));
+    }
+
+    #[test]
+    fn over_hour_rejected() {
+        assert!(resolve_interval("1e300", 1_000).is_err());
+        assert!(resolve_interval("3600.5", 1_000).is_err());
+        assert!(resolve_interval("61", 60_000).is_err());
+    }
+
+    #[test]
+    fn invalid_inputs_rejected() {
+        assert!(resolve_interval("abc", 1).is_err());
+        assert!(resolve_interval("-5", 1).is_err());
+        assert!(resolve_interval("inf", 1).is_err());
+        assert!(resolve_interval("nan", 1).is_err());
     }
 }

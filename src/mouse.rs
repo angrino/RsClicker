@@ -73,8 +73,8 @@ impl MouseMonitor {
     pub fn status(&self) -> MonitorStatus {
         self.status
             .lock()
-            .map(|s| s.clone())
-            .unwrap_or(MonitorStatus::Unknown)
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
