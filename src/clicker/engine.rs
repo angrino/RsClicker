@@ -6,7 +6,9 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::types::{create_enigo, perform_single_click, ClickConfig};
+use super::types::{ClickBackend, ClickConfig, EnigoBackend, InjectionBackend};
+#[cfg(target_os = "linux")]
+use super::types::UinputBackend;
 
 /// Grace period `stop()` waits for an in-flight click to finish before it
 /// hands the join to a reaper thread.
@@ -15,10 +17,13 @@ const STOP_WAIT_MS: u64 = 50;
 /// Why a click engine failed to run.
 #[derive(Debug, Clone)]
 pub enum StartError {
-    /// No input-emulation backend is available (e.g. on Wayland without an
-    /// `org.freedesktop.portal.RemoteDesktop` provider, enigo cannot inject
-    /// input and panics internally — caught here and reported instead).
+    /// No input-emulation backend is available (on Wayland enigo cannot
+    /// inject without an `org.freedesktop.portal.RemoteDesktop` provider
+    /// and panics internally — caught here and reported instead).
     NoBackend(&'static str),
+    /// Writing `/dev/uinput` failed (missing permission or missing device).
+    #[cfg(target_os = "linux")]
+    UinputUnavailable(String),
 }
 
 impl std::fmt::Display for StartError {
@@ -29,6 +34,12 @@ impl std::fmt::Display for StartError {
                 "No input backend ({backend}). On Wayland this needs an \
                  xdg-desktop-portal RemoteDesktop provider (e.g. GNOME, KDE \
                  or Hyprland with portals enabled)."
+            ),
+            #[cfg(target_os = "linux")]
+            StartError::UinputUnavailable(reason) => write!(
+                f,
+                "uinput unavailable: {reason} — add your user to the \
+                 uinput group and re-login."
             ),
         }
     }
@@ -78,7 +89,7 @@ impl ClickEngine {
             .take()
     }
 
-    pub fn start(&mut self, config: ClickConfig) {
+    pub fn start(&mut self, config: ClickConfig, backend: InjectionBackend) {
         self.stop();
         *self.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -97,7 +108,7 @@ impl ClickEngine {
             .name("rsclicker-click".to_string())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || worker_body(&flag, &error, &generation, gen, &config),
+                    || worker_body(&flag, &error, &generation, gen, &config, backend),
                 ));
                 if generation.load(Ordering::SeqCst) == gen {
                     if let Err(payload) = outcome {
@@ -145,41 +156,86 @@ impl Drop for ClickEngine {
     }
 }
 
-/// Creates the enigo backend and runs the click loop. Reports startup
-/// failure (no backend) through `error`, but only while `gen` is the
-/// current generation.
+/// Creates the selected injection backend and runs the click loop. Reports
+/// startup failure through `error`, but only while `gen` is the current
+/// generation.
 fn worker_body(
     flag: &AtomicBool,
     error: &Mutex<Option<String>>,
     generation: &AtomicU64,
     gen: u64,
     config: &ClickConfig,
+    backend: InjectionBackend,
 ) {
-    // enigo may panic internally when no backend exists (notably the libei
-    // RemoteDesktop portal path on Wayland). Catch it so the whole app
-    // doesn't go down; report through the error flag.
-    let mut enigo = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        create_enigo,
-    )) {
-        Ok(Some(e)) => e,
-        Ok(None) => {
-            if generation.load(Ordering::SeqCst) == gen {
-                *error.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(StartError::NoBackend("enigo").to_string());
-            }
-            return;
+    match backend {
+        InjectionBackend::Enigo => {
+            // enigo may panic internally when no backend exists (notably the
+            // libei RemoteDesktop portal path on Wayland). Catch it so the
+            // whole app doesn't go down; report through the error flag.
+            let backend = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                EnigoBackend::new,
+            )) {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    report_generation_error(generation, gen, error, StartError::NoBackend("enigo"));
+                    return;
+                }
+                Err(_) => {
+                    report_generation_error(
+                        generation,
+                        gen,
+                        error,
+                        StartError::NoBackend("enigo/libei"),
+                    );
+                    return;
+                }
+            };
+            let mut backend = backend;
+            run_click_loop_backend(flag, generation, gen, error, config, &mut backend);
         }
-        Err(_) => {
-            if generation.load(Ordering::SeqCst) == gen {
-                *error.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(StartError::NoBackend("enigo/libei").to_string());
-            }
-            return;
+        #[cfg(target_os = "linux")]
+        InjectionBackend::Uinput => {
+            // Failing to open /dev/uinput is a plain error, not a backend
+            // absence — reported with the fix hint and nothing is warped.
+            let mut backend = match UinputBackend::new() {
+                Ok(b) => b,
+                Err(e) => {
+                    report_generation_error(
+                        generation,
+                        gen,
+                        error,
+                        StartError::UinputUnavailable(e),
+                    );
+                    return;
+                }
+            };
+            run_click_loop_backend(flag, generation, gen, error, config, &mut backend);
         }
-    };
+    }
+}
+
+fn report_generation_error(
+    generation: &AtomicU64,
+    gen: u64,
+    error: &Mutex<Option<String>>,
+    err: StartError,
+) {
+    if generation.load(Ordering::SeqCst) == gen {
+        *error.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+    }
+}
+
+fn run_click_loop_backend(
+    flag: &AtomicBool,
+    generation: &AtomicU64,
+    gen: u64,
+    error: &Mutex<Option<String>>,
+    config: &ClickConfig,
+    backend: &mut dyn ClickBackend,
+) {
     let interval = config.sanitized_interval_ms();
     run_click_loop(flag, generation, gen, error, interval, |index| {
-        perform_single_click(&mut enigo, config, index)
+        backend.click(config, index)
     });
 }
 

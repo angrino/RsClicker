@@ -42,9 +42,15 @@
 | Capability      | Linux (Wayland)              | Linux (X11)              | Windows 10/11        |
 | --------------- | ---------------------------- | ------------------------ | -------------------- |
 | Global hotkeys  | portal `GlobalShortcuts`     | X11 protocol             | Win32 (native)       |
-| Clicking        | portal `RemoteDesktop`/libei | XTEST via x11rb          | SendInput (native)   |
+| Clicking        | portal `RemoteDesktop`/libei, or uinput | XTEST via x11rb, or uinput | SendInput (native) |
 | Mouse triggers  | evdev (`input` group)        | evdev (`input` group)    | rdev hook (native)   |
 | Key capture     | iced (in-app focus)          | iced (in-app focus)      | iced (in-app focus)  |
+
+Linux clicks go through either enigo (default: XTEST on X11, the
+`RemoteDesktop`/libei portals on Wayland) or the settings-switchable
+Kernel-level uinput backend (`/dev/uinput`, needs the `uinput` group; the
+virtual device's clicks surface in `/dev/input`, where the injected-pair
+filter drops them).
 
 Minimal Wayland compositors without the portals above will show red ERROR
 states for hotkeys/clicking — by design, instead of panicking. Mouse

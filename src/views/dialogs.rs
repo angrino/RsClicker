@@ -106,7 +106,23 @@ pub fn app_settings_dialog(state: &RsClicker) -> Element<'_, Message> {
     ]
     .spacing(10);
 
-    let content = column![
+    #[cfg(target_os = "linux")]
+    let input_row = row![
+        option_button(
+            crate::settings_store::InputBackend::Enigo.label(),
+            pending.input_backend == crate::settings_store::InputBackend::Enigo,
+            Message::SetInputBackend(crate::settings_store::InputBackend::Enigo)
+        ),
+        option_button(
+            crate::settings_store::InputBackend::Uinput.label(),
+            pending.input_backend == crate::settings_store::InputBackend::Uinput,
+            Message::SetInputBackend(crate::settings_store::InputBackend::Uinput)
+        ),
+    ]
+    .spacing(10);
+
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut content = column![
         text("Settings").size(20).font(crate::theme::bold()).center(),
         text("Theme").size(14).font(crate::theme::bold()),
         theme_row,
@@ -116,23 +132,41 @@ pub fn app_settings_dialog(state: &RsClicker) -> Element<'_, Message> {
         accent_grid,
         text("Profiles view").size(14).font(crate::theme::bold()),
         view_row,
-        button(text("About RsClicker").center())
-            .width(Length::Fill)
-            .on_press(Message::OpenAbout)
-            .style(button::secondary),
-        row![
-            button("Cancel")
+    ];
+
+    #[cfg(target_os = "linux")]
+    {
+        content = content
+            .push(text("Input emulation").size(14).font(crate::theme::bold()))
+            .push(input_row)
+            .push(
+                text("uinput clicks straight through the kernel (needs the 'uinput' \
+                      group); enigo uses X11 or the desktop portals.")
+                    .size(12),
+            );
+    }
+
+    let content = content
+        .push(
+            button(text("About RsClicker").center())
                 .width(Length::Fill)
-                .on_press(Message::CloseModal)
+                .on_press(Message::OpenAbout)
                 .style(button::secondary),
-            button("Apply")
-                .width(Length::Fill)
-                .on_press(Message::ApplySettings)
-                .style(button::primary),
-        ]
-        .spacing(10),
-    ]
-    .spacing(12);
+        )
+        .push(
+            row![
+                button("Cancel")
+                    .width(Length::Fill)
+                    .on_press(Message::CloseModal)
+                    .style(button::secondary),
+                button("Apply")
+                    .width(Length::Fill)
+                    .on_press(Message::ApplySettings)
+                    .style(button::primary),
+            ]
+            .spacing(10),
+        )
+        .spacing(12);
 
     dialog_card(content.into(), 340.0)
 }

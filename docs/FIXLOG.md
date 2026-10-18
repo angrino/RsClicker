@@ -311,7 +311,45 @@ cut. Each session's fixes land under one dated session heading.
 - Also documents the deadline train, the capture-modal hotkey gate and
   the drift-free cadence.
 
+### Added: secondary Linux injection backend — kernel-level uinput
+- Why: the user's distro currently misbehaves on the desktop portals, so a
+  backend that bypasses portals entirely is wanted — non-default, switched
+  in the Linux settings, while enigo stays the first choice.
+- `src/clicker/types.rs`: new `ClickBackend` trait — `EnigoBackend` wraps
+  the previous single path (identical click semantics incl. the
+  double-click gap), `UinputBackend` (Linux) builds an evdev
+  `VirtualDevice` (BTN_LEFT/RIGHT/MIDDLE + REL_X/REL_Y) and emits
+  press/release batches; Fixed/Sequence targets steer via
+  `abs_move_deltas` corner-clamp — one −32767 delta clamps at the
+  top-left screen corner, then the exact positive offset applies (no
+  screen-size queries needed). Dropping the backend destroys the virtual
+  device.
+- `src/clicker/engine.rs`: `InjectionBackend` (Enigo | Uinput) is plumbed
+  through `ClickEngine::start(config, backend)` → `worker_body`; a failed
+  `/dev/uinput` open surfaces as `StartError::UinputUnavailable("… add
+  your user to the uinput group and re-login.")` — red ERROR state, the
+  profile stays re-armable after fixing permissions. Enigo keeps its
+  catch_unwind NoBackend handling unchanged.
+- `src/settings_store.rs`: `AppSettings.input_backend: InputBackend`
+  (`#[serde(default)]` — old `settings.json` files stay loadable; default
+  is `Enigo`). Windows ignores the setting (always enigo/SendInput) via
+  `to_engine_backend`.
+- `src/views/dialogs.rs`: Linux-only "Input emulation" option row
+  (enigo/uinput, same option-button style) + one hint line about needing
+  the `uinput` group; everything hidden on Windows.
+- Self-trigger note: uinput clicks DO surface in `/dev/input` (unlike
+  XTEST) — Session 2's `filter_injected_pairs` already covers this (each
+  injected press→release pair lands within the 20 ms window and both
+  edges are dropped). Needs one runtime sanity pass on real hardware
+  after enabling the group.
+- Tests +5: settings missing-field → Enigo, serde roundtrip, setting→
+  backend mapping (Linux), corner-clamp reaching exact targets under
+  simulated screen-edge clamping, sequence target resolution by index.
+- Device creation itself is not unit-testable (needs `/dev/uinput`
+  permission); verified logically, real-hardware check pending.
+
 ### Session verification
-- `cargo test --release`: 34 tests pass (33 previous + 1 cadence).
-- `cargo build --release`: clean.
-- `cargo check --target x86_64-pc-windows-gnu --release`: clean.
+- `cargo test --release`: 39 tests pass (34 previous + 5 backend/settings).
+- `cargo build --release`: clean, zero warnings.
+- `cargo check --target x86_64-pc-windows-gnu --release`: clean, zero
+  warnings.

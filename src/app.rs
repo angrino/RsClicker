@@ -17,6 +17,8 @@ use crate::profile::{
     save_profile, split_interval, ClickPoint, PressMode, Profile, TimeUnit,
 };
 use crate::settings_store::{load_settings, save_settings, AppSettings};
+#[cfg(target_os = "linux")]
+use crate::settings_store::InputBackend;
 use crate::theme::{Accent, BaseTheme, ViewMode};
 use crate::trigger::{
     armed_matches_profile, capture_hotkey, profile_config, trigger_label, ArmedProfile, Capture,
@@ -137,6 +139,8 @@ pub enum Message {
     SetTheme(BaseTheme),
     SetAccent(Accent),
     SetViewMode(ViewMode),
+    #[cfg(target_os = "linux")]
+    SetInputBackend(InputBackend),
     OpenAbout,
     OpenLicense,
     OpenCapture,
@@ -287,7 +291,8 @@ impl RsClicker {
 
     fn start_engine(&mut self, name: &str, config: ClickConfig) {
         self.errors.remove(name);
-        self.engine_mut(name).start(config);
+        let backend = self.settings.input_backend.to_engine_backend();
+        self.engine_mut(name).start(config, backend);
         self.status = format!("Running ({name})");
     }
 
@@ -696,6 +701,8 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
         Message::SetTheme(base) => state.pending_settings.base = base,
         Message::SetAccent(accent) => state.pending_settings.accent = accent,
         Message::SetViewMode(view) => state.pending_settings.view = view,
+        #[cfg(target_os = "linux")]
+        Message::SetInputBackend(backend) => state.pending_settings.input_backend = backend,
         Message::OpenAbout => state.push_modal(Modal::About),
         Message::OpenLicense => state.push_modal(Modal::License),
         Message::OpenCapture => state.push_modal(Modal::Capture),
