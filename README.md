@@ -14,7 +14,7 @@ for input emulation (plus an optional kernel-level **uinput** backend on
 Linux), and raw input monitoring (evdev on Linux, rdev on Windows 10/11) for
 global mouse triggers.
 
-![RsClicker main screen](screenshots/main.png)
+![RsClicker main screen](screenshots/screenshot0.png)
 
 ## Features
 
@@ -53,7 +53,7 @@ How clicks reach the screen, switchable in *Settings → Input emulation*
   Missing permission surfaces as a red ERROR state with the fix hint —
   never a silent failure.
 
-![Input emulation in settings](screenshots/input-emulation.png)
+![Input emulation in settings](screenshots/screenshot1.png)
 
 ## Installation
 
