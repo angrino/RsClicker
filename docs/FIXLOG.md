@@ -231,3 +231,50 @@ cut. Each session's fixes land under one dated session heading.
   2, reserved names 3, trigger resync 3, interval 6).
 - `cargo build --release`: clean.
 - `cargo check --target x86_64-pc-windows-gnu --release`: clean.
+
+## Session 3 — 2026-10-18
+
+### Fixed (critical): saving kept a stale display name → profile file deleted
+- Symptom: profiles are listed and keyed by their sanitized file stem
+  (`My Profile` is stored as `My_Profile.json` and listed as
+  `My_Profile`). Saving such a profile from the editor compared the raw
+  strings — `"My Profile" != "My_Profile"` — so `SaveProfile` treated
+  every save as a rename: it wrote `My_Profile.json` (same file), then
+  `delete_profile("My_Profile")` deleted the file just written. The
+  profile vanished from disk on the first Save; armed state pointed at a
+  key the list no longer shows. Found by the session-3 self-audit (user
+  asked for undocumented bugs), not user-reported.
+- Fix (`src/app.rs`):
+  - `SaveProfile` decides "rename" with `same_profile_file(old, new)` —
+    sanitized comparison — instead of raw string inequality; the
+    duplicate-name check now only fires when the target file actually
+    differs from the old one (`editing_name` also only moves on a real
+    rename, so the editor's manual-engine key stays the list stem).
+  - `resync_after_save` treats a save whose display name sanitizes onto
+    the same file as a same-key save: armed/engines/errors keep their
+    list key (no spurious rebuild/rearm when the config is unchanged,
+    rebuild stays under the stem key when it is needed). Real renames
+    (different sanitized file) behave exactly as before: state moves to
+    the new key, the old file is deleted.
+- Tests: `sanitize_collision_matrix` extended with the stem-vs-display
+  cases (`"My Profile"` vs `"My_Profile"`, `"Nice profile!"` vs
+  `"Nice_profile_"`).
+
+### Fixed (high): armed hotkeys routed while the Capture modal was open (#13)
+- Symptom: `Message::Tick` polled and routed global-hotkey events
+  unconditionally, so an armed profile kept firing while the Capture
+  modal recorded a new trigger — pressing F6 to capture F6 toggled the
+  F6-armed profile instead of being sampled (mouse events already gated
+  capture vs routing; hotkeys did not). Backlog issue #13.
+- Fix (`src/app.rs`): `hotkeys_route_allowed(top_modal)` gates
+  `route_hotkey`; while capture is open the hotkey queue is still drained
+  so events don't pile up, but every edge is discarded. The capture flow
+  itself is unaffected (keyboard capture runs via `Message::KeyEvent`,
+  which keeps its own modal gate).
+- Tests: `app::hotkey_gate_tests` — capture suppresses, other modals and
+  `None` route.
+
+### Session verification
+- `cargo test --release`: 33 tests pass (31 previous + 2 hotkey-gate).
+- `cargo build --release`: clean.
+- `cargo check --target x86_64-pc-windows-gnu --release`: clean.

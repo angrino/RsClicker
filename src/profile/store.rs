@@ -156,6 +156,10 @@ mod tests {
     #[test]
     fn sanitize_collision_matrix() {
         assert!(same_profile_file("a/b", "a:b"));
+        // Display name vs the sanitized stem it was listed under — both
+        // map to the same file, so a save must never delete it.
+        assert!(same_profile_file("My Profile", "My_Profile"));
+        assert!(same_profile_file("Nice profile!", "Nice_profile_"));
         assert!(!same_profile_file("one", "two"));
     }
 }

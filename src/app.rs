@@ -391,15 +391,20 @@ impl RsClicker {
     /// restarts with the new config, and a rename carries the state to the
     /// new key. A failed rebuild falls back to Idle with the reason shown.
     fn resync_after_save(&mut self, old: &str, new: &str) {
+        // `old` is the list key (a file stem), `new` the display name just
+        // saved. Both can map to the same file — only a different file is
+        // a rename; keep the existing key, else the main list desyncs.
+        let is_rename = !same_profile_file(old, new);
+        let target = if is_rename { new.to_string() } else { old.to_string() };
         let Some(armed) = self.armed.get(old).cloned() else {
-            if old != new {
+            if is_rename {
                 self.engines.remove(old);
                 self.errors.remove(old);
             }
             self.status = format!("Saved {new}");
             return;
         };
-        if old == new && armed_matches_profile(&armed, &self.profile) {
+        if !is_rename && armed_matches_profile(&armed, &self.profile) {
             self.status = format!("Saved {new}");
             return;
         }
@@ -425,7 +430,7 @@ impl RsClicker {
         match outcome {
             Ok((trigger, config)) => {
                 self.armed.insert(
-                    new.to_string(),
+                    target.clone(),
                     ArmedProfile {
                         config: config.clone(),
                         trigger,
@@ -433,12 +438,12 @@ impl RsClicker {
                     },
                 );
                 if was_running {
-                    self.start_engine(new, config);
+                    self.start_engine(&target, config);
                 }
                 self.status = format!("Saved {new} — armed state updated.");
             }
             Err(reason) => {
-                self.engines.remove(new);
+                self.engines.remove(&target);
                 self.status = format!("Saved {new}. Disarmed: {reason}");
             }
         }
@@ -564,6 +569,12 @@ impl RsClicker {
     }
 }
 
+/// Issue #13: while the capture modal is open, armed global hotkeys must
+/// not route — capturing a key would otherwise fire other profiles.
+fn hotkeys_route_allowed(top: Option<Modal>) -> bool {
+    top != Some(Modal::Capture)
+}
+
 fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
     match message {
         Message::Tick => {
@@ -576,8 +587,13 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
             if !state.modal.is_empty() && state.modal_alpha < 0.55 {
                 state.modal_alpha = (state.modal_alpha + 0.11).min(0.55);
             }
-            for (id, hk_state) in state.hotkeys.poll_events() {
-                state.route_hotkey(id, hk_state == HotKeyState::Pressed);
+            if hotkeys_route_allowed(state.top_modal()) {
+                for (id, hk_state) in state.hotkeys.poll_events() {
+                    state.route_hotkey(id, hk_state == HotKeyState::Pressed);
+                }
+            } else {
+                // Still drain the queue so events don't pile up mid-capture.
+                let _ = state.hotkeys.poll_events();
             }
             // Injected click pairs are dropped wholesale before routing or
             // capture so a profile's own clicks can never re-trigger it, and
@@ -762,21 +778,16 @@ fn update(state: &mut RsClicker, message: Message) -> Task<Message> {
                     .clone()
                     .unwrap_or_else(|| new_name.clone());
                 state.profile.name = new_name.clone();
-                if new_name != old
-                    && profile_file_exists(&new_name)
-                    && !same_profile_file(&old, &new_name)
-                {
+                if !same_profile_file(&old, &new_name) && profile_file_exists(&new_name) {
                     state.status = "Another profile already uses that name.".to_string();
                     state.profile.name = old;
                 } else {
                     match save_profile(&state.profile) {
                         Ok(()) => {
                             let mut rename_note = String::new();
-                            if new_name != old {
-                                // Renaming is save-new + delete-old; live
-                                // state is carried over by the resync step.
-                                // A failed delete leaves the old file behind
-                                // — surfaced, never silently orphaned.
+                            // Rename is save-new + delete-old — only when the
+                            // sanitized file actually changes.
+                            if !same_profile_file(&old, &new_name) {
                                 rename_note = match delete_profile(&old) {
                                     Ok(()) => String::new(),
                                     Err(e) => format!(" (old file kept: {e})"),
@@ -883,7 +894,6 @@ fn view(state: &RsClicker) -> Element<'_, Message> {
 mod interval_tests {
     use super::resolve_interval;
     use crate::clicker::MAX_INTERVAL_MS;
-
     #[test]
     fn parses_units_via_mult() {
         assert_eq!(resolve_interval("100", 1).unwrap(), Some(100));
@@ -920,5 +930,23 @@ mod interval_tests {
         assert!(resolve_interval("-5", 1).is_err());
         assert!(resolve_interval("inf", 1).is_err());
         assert!(resolve_interval("nan", 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hotkey_gate_tests {
+    use super::{hotkeys_route_allowed, Modal};
+
+    #[test]
+    fn capture_suppresses_routing() {
+        assert!(!hotkeys_route_allowed(Some(Modal::Capture)));
+    }
+
+    #[test]
+    fn other_modals_and_none_route() {
+        assert!(hotkeys_route_allowed(None));
+        for m in [Modal::NewProfile, Modal::Editor, Modal::AppSettings, Modal::About] {
+            assert!(hotkeys_route_allowed(Some(m)));
+        }
     }
 }
