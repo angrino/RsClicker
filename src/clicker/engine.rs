@@ -4,7 +4,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::types::{create_enigo, perform_single_click, ClickConfig};
 
@@ -195,6 +195,8 @@ fn run_click_loop(
     mut click_once: impl FnMut(usize) -> Result<(), String>,
 ) {
     let mut index = 0usize;
+    let interval_dur = Duration::from_millis(interval.max(1));
+    let mut next_deadline = Instant::now();
     while flag.load(Ordering::SeqCst) {
         if let Err(e) = click_once(index) {
             if generation.load(Ordering::SeqCst) == gen {
@@ -204,13 +206,21 @@ fn run_click_loop(
             break;
         }
         index = index.wrapping_add(1);
-        // Sleep in small slices so `stop()` reacts quickly even when the
-        // configured interval is very large (minutes/hours).
-        let mut remaining = interval;
-        while remaining > 0 && flag.load(Ordering::SeqCst) {
-            let step = remaining.min(50);
-            thread::sleep(Duration::from_millis(step));
-            remaining = remaining.saturating_sub(step);
+        next_deadline += interval_dur;
+        let now = Instant::now();
+        if next_deadline < now {
+            // Prevent catch-up bursts if a lag spike or sleep overshoot occurs.
+            next_deadline = now + interval_dur;
+        } else {
+            // Sleep in small slices until `next_deadline` so `stop()` stays responsive.
+            while flag.load(Ordering::SeqCst) {
+                let remaining = next_deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let step = remaining.min(Duration::from_millis(50));
+                thread::sleep(step);
+            }
         }
     }
 }
@@ -240,6 +250,8 @@ mod tests {
     use std::panic::{catch_unwind, panic_any};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn str_payload() {
@@ -300,5 +312,30 @@ mod tests {
         });
         assert!(error.lock().unwrap().is_none());
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cadence_follows_deadlines_not_click_latency() {
+        // Injection cost must not shift the schedule: click k lands on the
+        // deadline train anchored at loop start, not after
+        // (interval + latency) * k like the old slice-sleep code.
+        let flag = AtomicBool::new(true);
+        let generation = AtomicU64::new(0);
+        let error: Mutex<Option<String>> = Mutex::new(None);
+        let mut stamps: Vec<Instant> = Vec::new();
+        run_click_loop(&flag, &generation, 0, &error, 50, |i| {
+            stamps.push(Instant::now());
+            thread::sleep(Duration::from_millis(30));
+            if i < 5 {
+                Ok(())
+            } else {
+                Err("end".to_string())
+            }
+        });
+        assert_eq!(stamps.len(), 6);
+        let span_ms = (stamps[5] - stamps[0]).as_millis();
+        // Ideal span is 250 ms; the old drift code produced ≈400 ms here.
+        assert!(span_ms >= 240, "span {span_ms} ms — too fast for 5×50 ms");
+        assert!(span_ms <= 330, "span {span_ms} ms — drifted like the old loop");
     }
 }

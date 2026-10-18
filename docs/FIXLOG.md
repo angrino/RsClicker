@@ -274,7 +274,44 @@ cut. Each session's fixes land under one dated session heading.
 - Tests: `app::hotkey_gate_tests` — capture suppresses, other modals and
   `None` route.
 
+### Fixed (medium): click-interval drift accumulated per click (#10)
+- Symptom: the loop slept the full configured interval *after* the click,
+  so the cadence was `interval + click_latency` — an XTEST/libei/SendInput
+  click costs 10–30 ms, meaning a 40 ms profile drifted ~50% slow (CPS
+  understated with every profile kind; the cost also varies per backend).
+- Fix (`src/clicker/engine.rs`): `run_click_loop` follows a shared
+  deadline train (`Instant`): the deadline for click k is
+  `start + k·interval`; each iteration sleeps only until its deadline (in
+  ≤ 50 ms responsive slices), and a deadline already in the past (slow
+  backend, machine nap) resets `now + interval` instead of bursting
+  catch-up clicks.
+- Tests: `cadence_follows_deadlines_not_click_latency` — 6 clicks,
+  50 ms interval, 30 ms simulated injection cost: the first-to-last span
+  stays ≈ 250 ms (the old loop produced ≈ 400 ms); slice stops still
+  covered by the existing removal of the old per-iteration full sleep.
+
+### Fixed (medium): double click had no inter-click gap (#12)
+- Symptom: `ClickKind::Double` issued two zero-distance
+  `enigo.button(.., Click)` calls — X11, Wayland compositors and Win32 can
+  fold two events with no gap into a single press, so targets requiring a
+  real double click (e.g. list rows, file dialogs) mistook it for one
+  click.
+- Fix (`src/clicker/types.rs`): new const `DOUBLE_CLICK_GAP_MS = 30` —
+  `perform_single_click` sleeps that long between the paired clicks, a
+  human-like gap that is negligible against any configured profile
+  interval. The gap applies only inside the pair, so the injected-pair
+  filter (Session 2) still recognizes each half as its own instant
+  press→release pair.
+
+### Docs: `docs/ARCHITECTURE.md` refresh
+- The two session-1 wording debts are fixed: "stop signals and joins it"
+  → bounded 50 ms wait + detached reaper + generation counters; "renaming
+  a profile moves the file" → save-new + delete-old only when the
+  sanitized file name changes, live state rebuilt onto the new key.
+- Also documents the deadline train, the capture-modal hotkey gate and
+  the drift-free cadence.
+
 ### Session verification
-- `cargo test --release`: 33 tests pass (31 previous + 2 hotkey-gate).
+- `cargo test --release`: 34 tests pass (33 previous + 1 cadence).
 - `cargo build --release`: clean.
 - `cargo check --target x86_64-pc-windows-gnu --release`: clean.

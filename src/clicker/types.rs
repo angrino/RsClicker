@@ -1,5 +1,6 @@
 use enigo::{Button, Coordinate, Direction, Enigo, Mouse, Settings};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MouseButtonKind {
@@ -69,6 +70,11 @@ impl Default for ClickConfig {
 /// carry an absurd interval.
 pub const MAX_INTERVAL_MS: u64 = 3_600_000;
 
+/// Inter-click gap inside one double click. A strict zero gap can merge
+/// both clicks into one press event on X11/Wayland/Win32; a human-like gap
+/// is recognized as a double click everywhere.
+pub const DOUBLE_CLICK_GAP_MS: u64 = 30;
+
 impl ClickConfig {
     pub fn sanitized_interval_ms(&self) -> u64 {
         self.interval_ms.clamp(1, MAX_INTERVAL_MS)
@@ -104,6 +110,7 @@ pub fn perform_single_click(
         .button(button, Direction::Click)
         .map_err(|e| e.to_string())?;
     if config.kind == ClickKind::Double {
+        std::thread::sleep(Duration::from_millis(DOUBLE_CLICK_GAP_MS));
         enigo
             .button(button, Direction::Click)
             .map_err(|e| e.to_string())?;

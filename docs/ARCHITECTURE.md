@@ -19,12 +19,18 @@
 ## Runtime model
 
 - **Engines:** `HashMap<String, ClickEngine>` — at most one worker thread
-  per profile. `start` spawns (or restarts) the thread; `stop` signals and
-  joins it. Sleeping in 50 ms slices keeps stop latency low even for
+  per profile. `start` spawns (or restarts) the thread; `stop` signals it,
+  waits at most 50 ms on a per-worker exit signal, and hands any leftover
+  join to a detached `rsclicker-join` reaper — the UI thread never joins.
+  Per-engine generation counters guard state tails from stale workers.
+  Clicks follow a shared deadline train (`Instant`-anchored, drift-free);
+  sleeps stay in ≤ 50 ms slices so stop latency stays low even for
   hour-long intervals.
 - **Armed triggers:** `HashMap<String, ArmedProfile>` — keyboard triggers
   are registered globally (`trigger_id → profile`), mouse triggers need no
-  registration and are matched from the monitor channel.
+  registration and are matched from the monitor channel. Global hotkey
+  events are not routed while the Capture modal is open (drained, then
+  discarded).
 - **Event flow:** every 50 ms tick drains (1) global-hotkey press/release
   events, (2) the mouse-monitor channel, (3) per-engine error flags.
   Toggle uses press edges; Hold uses press + release.
@@ -48,6 +54,7 @@ triggers via evdev keep working there.
 
 `{config}/rsclicker/profiles/<sanitized>.json`, pretty JSON. Field renames
 keep `serde(alias)` compatibility (e.g. `toggle_hotkey` → `trigger_hotkey`);
-unknown keys are ignored. Renaming a profile moves the file and drops live
-state bound to the old name; sanitize collisions (`a/b` vs `a:b`) are
-rejected at create/rename time.
+unknown keys are ignored. Renaming a profile is save-new + delete-old and
+only when the sanitized file name actually changes — live armed state is
+rebuilt onto the new key by the resync step. Sanitize collisions
+(`a/b` vs `a:b`) are rejected at create/rename time.
