@@ -33,6 +33,20 @@ sudo apk add build-base pkgconf libxkbcommon-dev
 
 <!-- TODO: note which distros you actually tested; if a build fails for you, please open an issue -->
 
+For global mouse triggers, your user must be able to read `/dev/input`:
+
+```bash
+sudo usermod -aG input "$USER"   # log out and back in afterwards
+```
+
+Optional — to use the kernel-level uinput injection backend (Settings →
+Input emulation → uinput), your user also needs write access to
+`/dev/uinput`:
+
+```bash
+sudo usermod -aG uinput "$USER"  # log out and back in afterwards
+```
+
 Then build and run:
 
 ```bash
@@ -40,8 +54,8 @@ cargo build --release
 ./target/release/RsClicker
 ```
 
-Runtime setup (input permissions, rendering backend) is covered in
-[USAGE.md](USAGE.md).
+On old Intel GPUs (e.g. Haswell) the app defaults to software rendering
+(`ICED_BACKEND=tiny-skia`); override with `ICED_BACKEND=wgpu` if you prefer.
 
 ## Windows 10/11
 
@@ -92,12 +106,24 @@ products and Windows SmartScreen flag as suspicious. These are false positives
 on unsigned binaries. You can verify the source and build it yourself using the
 steps above.
 
-## Releases
+## Release packaging
 
-Pre-built binaries are produced automatically by GitHub Actions when a version
-tag is pushed (see `.github/workflows/release.yml`):
+Verified release binaries are collected under a dated folder in the repo
+(not committed to git — they ship via GitHub Releases):
 
 ```bash
-git tag v26.10.16
-git push origin v26.10.16
+mkdir -p releases/26.10.19
+cp target/release/RsClicker                              releases/26.10.19/RsClicker-linux-x86_64
+cp target/x86_64-pc-windows-gnu/release/RsClicker.exe    releases/26.10.19/RsClicker-windows-x64.exe
 ```
+
+Tag the release so its tree stays findable:
+
+```bash
+git tag v26.10.19
+git push origin v26.10.19
+```
+
+Before packaging, run the release gate (see `docs/FIXLOG.md` for each
+session's verification): `cargo test --release`, then both builds above
+must finish clean.

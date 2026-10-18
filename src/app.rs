@@ -29,7 +29,7 @@ use crate::views::{self};
 /// Project release version (date-based YY.MM.DD, see
 /// `[package.metadata.rsclicker]` in Cargo.toml). Note: Cargo package
 /// version intentionally stays at 0.1.0.
-pub(crate) const VERSION: &str = "26.10.15";
+pub(crate) const VERSION: &str = "26.10.19";
 pub(crate) const REPO: &str = "https://github.com/voidx9x/RsClicker";
 pub(crate) const SPLASH_TICKS: u32 = 44; // ~2.2s at 50ms per tick
 

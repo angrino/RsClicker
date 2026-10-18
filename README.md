@@ -1,7 +1,7 @@
 # RsClicker
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-26.10.15-blue.svg)](docs/VERSIONING.md)
+[![Release](https://img.shields.io/badge/release-26.10.19-blue.svg)](docs/VERSIONING.md)
 ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)
 
@@ -10,11 +10,11 @@ A cross-platform auto clicker written in Rust.
 Create profiles, arm them with a keyboard hotkey or a mouse button (including
 side buttons), and fire precise click sequences anywhere. Built with
 [iced](https://iced.rs) for the GUI, [enigo](https://github.com/enigo-rs/enigo)
-for input emulation, and raw input monitoring (evdev on Linux, rdev on
-Windows 10/11) for global mouse triggers.
+for input emulation (plus an optional kernel-level **uinput** backend on
+Linux), and raw input monitoring (evdev on Linux, rdev on Windows 10/11) for
+global mouse triggers.
 
-<!-- TODO: add a screenshot or GIF, e.g. docs/screenshot.png -->
-![RsClicker screenshot](docs/screenshot.png)
+![RsClicker main screen](screenshots/main.png)
 
 ## Features
 
@@ -27,18 +27,46 @@ Windows 10/11) for global mouse triggers.
 - **Targets** — current position, fixed coordinates, or a point sequence.
 - **Multi-run** — arm and run several profiles at the same time; per-profile
   state colors: gray idle, orange listening, green running, red error.
+- **Drift-free timing** — clicks follow a shared deadline train: the set
+  interval holds even when an injection costs extra milliseconds.
+- **Real double clicks** — a human-like 30 ms inter-click gap is recognized
+  by X11, Wayland compositors and Windows alike.
 - **Themes** — Light/Dark base × 8 accent colors, applied via settings.
 - **Animated splash** with brand intro, modal dialogs, settings persisted to
   disk.
+
+## Linux injection backends
+
+How clicks reach the screen, switchable in *Settings → Input emulation*
+(Linux only; Windows always uses native SendInput):
+
+- **enigo** *(default)* — XTEST on X11, or the desktop portals
+  (`RemoteDesktop`/libei) on Wayland.
+- **uinput** — a kernel-level virtual mouse written straight to
+  `/dev/uinput`: no X11 server and **no portals involved**, so it works
+  everywhere the portals misbehave. Needs the `uinput` group:
+
+  ```bash
+  sudo usermod -aG uinput $USER   # log out and back in afterwards
+  ```
+
+  Missing permission surfaces as a red ERROR state with the fix hint —
+  never a silent failure.
+
+![Input emulation in settings](screenshots/input-emulation.png)
 
 ## Installation
 
 ### Pre-built binaries
 
 Download the latest build for your platform from the
-[Releases page](https://github.com/voidx9x/RsClicker/releases).
+[Releases page](https://github.com/voidx9x/RsClicker/releases):
 
-<!-- TODO: list the actual artifacts (e.g. Windows .exe, Linux AppImage / tarball) -->
+- `RsClicker-windows-x64.exe` — Windows 10/11.
+- `RsClicker-linux-x86_64` — Linux tarball binary.
+
+<!-- TODO: keep artifact names in sync with the release packaging
+     (docs/BUILDING.md — Release packaging). -->
 
 ### Build from source
 
@@ -61,7 +89,7 @@ Windows cross-compilation and other build details are in
 3. Back on the main screen press **▶** — it turns orange (listening).
 4. Press your trigger key/button: green means clicking. Press again to stop.
 
-More in [docs/USAGE.md](docs/USAGE.md).
+More in [docs/USAGE.md](docs/USAGE.md) and [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Requirements
 
@@ -70,8 +98,9 @@ More in [docs/USAGE.md](docs/USAGE.md).
 Wayland or X11.
 
 - **Global hotkeys** need `org.freedesktop.portal.GlobalShortcuts`.
-- **Clicking on Wayland** needs `org.freedesktop.portal.RemoteDesktop`.
-  GNOME, KDE and Hyprland provide these; minimal compositors may not — the app
+- **Clicking on Wayland** needs `org.freedesktop.portal.RemoteDesktop`
+  (or the uinput backend above, which needs none of that). GNOME, KDE and
+  Hyprland provide the portals; minimal compositors may not — the app
   reports this as a red ERROR state instead of crashing.
 - **Mouse triggers** need read access to `/dev/input`. Add your user to the
   `input` group, then log out and back in:
@@ -103,12 +132,12 @@ src/
   theme.rs           Light/Dark x 8 accents, shared widget styles
   trigger.rs         trigger model, key capture, armed routing
   mouse.rs           global mouse monitor (evdev / rdev)
-  clicker/           click engine (own thread per profile)
+  clicker/           click engine (own thread per profile) + injection backends
   hotkey/            global-hotkey service wrapper
   profile/           profile model + JSON store
   settings_store.rs  persisted app settings
   views/             splash, main, editor modal, dialogs
-docs/                usage, architecture, building, versioning
+docs/                usage, features, architecture, building, versioning
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

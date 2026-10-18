@@ -9,11 +9,11 @@
 | `theme.rs`             | `BaseTheme`/`Accent` × palettes, shared widget styles      |
 | `trigger.rs`           | `EffectiveTrigger`, key capture, armed routing helpers      |
 | `mouse.rs`             | Global mouse monitor (platform backends below)              |
-| `clicker/engine.rs`    | One worker thread per running profile, 50 ms sleep slices   |
-| `clicker/types.rs`     | `ClickConfig`, `ClickTarget`, enigo glue                    |
+| `clicker/engine.rs`    | One worker thread per running profile, 50 ms slices + deadline cadence |
+| `clicker/types.rs`     | `ClickConfig`, `ClickTarget`, `ClickBackend` (enigo / uinput)              |
 | `hotkey/`              | `HotkeyService` wrapper around global-hotkey                |
 | `profile/`             | `Profile` model + JSON file store                           |
-| `settings_store.rs`    | Persisted `AppSettings` (`settings.json`)                  |
+| `settings_store.rs`    | Persisted `AppSettings` (`settings.json`, incl. input backend) |
 | `views/`               | `splash`, `main` (list/grid), `editor` modal, `dialogs`     |
 
 ## Runtime model

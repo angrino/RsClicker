@@ -69,6 +69,16 @@ The top-bar **⚙** opens app settings:
 - **Theme:** Light / Dark cards, **Accent:** 8 swatches (Orange, Aqua,
   Green, Purple, Red, Yellow, Pink, Blue).
 - **Profiles view:** List / Icons.
+- **Input emulation (Linux only):** chooses how clicks are injected —
+  *enigo* (default: XTEST on X11, desktop portals on Wayland) or *uinput*
+  (kernel-level virtual mouse, no portals involved). The uinput backend
+  needs write access to `/dev/uinput`:
+  ```bash
+  sudo usermod -aG uinput $USER   # log out and back in afterwards
+  ```
+  When the permission is missing the affected profiles show the red ERROR
+  state with the fix hint in the status line; nothing silently breaks.
+  Windows keeps the native SendInput path and hides this row.
 - **About** — project description + repository link; **License** shows the
   full MIT text.
 - Changes apply only after **Apply** (**Cancel** discards); settings persist

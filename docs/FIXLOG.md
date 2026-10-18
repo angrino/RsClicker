@@ -1,355 +1,134 @@
 # FIXLOG
 
-Working log of the important fixes. This file is a temporary record — it
-will be rewritten into the final documentation when the next release is
-cut. Each session's fixes land under one dated session heading.
+Release history in one file: what changed, where the fix lives, what is
+still accepted as a known limit. New sessions append under a release
+heading. Deep-dive details for the current release live in
+[FEATURES.md](FEATURES.md) / [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Session 1 — 2026-10-16
+- Symbols: `(critical/high/medium/minor)` importance, `#n` backlog issue.
+- Every session ends with the release gate: `cargo test --release`,
+  `cargo build --release`, and a clean
+  `cargo check --target x86_64-pc-windows-gnu --release`.
 
-### Docs audited
-- `docs/*.md` + `README.md` checked against the code: accurate, with two
-  wording notes (a profile rename is a save-new + delete-old, not an
-  atomic move, and stop no longer "joins it" — see below). Reword both in
-  the final doc rewrite.
+## 26.10.15 — initial public release
 
-### Fixed (critical): zombie RUNNING state after a worker panic
-- Symptom: a panic inside the click loop (enigo internals, e.g. the libei
-  portal path) killed the worker thread while the running flag stayed
-  `true` — the engine showed green "Running" forever, no clicks, no error,
-  and the panic hook in `main.rs` swallowed the message.
-- Fix (`src/clicker/engine.rs`): the whole worker body (enigo creation +
-  click loop) is wrapped in `catch_unwind`; a crash records
-  `Engine crashed: <message>` in the engine error slot and clears the
-  running flag → the UI's per-tick drain surfaces the red ERROR state and
-  the profile stays re-armable. Added `panic_message()` helper with unit
-  tests.
+Baseline: profiles, keyboard/mouse triggers with press-to-capture, Toggle /
+Hold modes, monotonic timing, fixed/sequence targets, multi-run engines,
+themes, settings/profiles stored as JSON, evdev/rdev mouse-trigger monitors,
+iced GUI with animated splash.
 
-### Fixed (critical): UI freeze on stop/start (worker join on the UI thread)
-- Symptom: `ClickEngine::stop()` joined the worker thread inside the iced
-  update thread — every stop (trigger, disarm, restart, drop) froze the UI
-  for the duration of an in-flight click, up to indefinitely when a
-  libei/portal call hangs.
-- Fix (`src/clicker/engine.rs`):
-  - `stop()` never joins on the caller thread: it waits at most
-    `STOP_WAIT_MS` (50 ms) on a per-worker "done" signal, then hands the
-    join to a detached `rsclicker-join` reaper thread.
-  - Worker tails now touch shared state conditionally: a per-engine
-    generation counter is bumped by `start()` *before* raising the flag,
-    and tails (flag clear, crash/NoBackend error reports) act only while
-    they are the current generation — without the old blocking join, the
-    tail of an in-flight old worker could otherwise clobber the next
-    worker's state.
-  - `worker_body` no longer clears the flag internally (the
-    generation-guarded tail owns it).
-- Added the `clear_flag_if_current` guard with a unit test proving stale
-  generations cannot clobber the flag.
-- Accepted trade-offs: a pathological portal hang leaks the worker thread
-  (the UI keeps working); a stop→start within one portal-click duration
-  can land one in-flight click from the old worker.
+## 26.10.19 — current
 
-### Fixed (critical): silent injection failures (green running, zero clicks)
-- Symptom: every enigo call in `perform_single_click` discarded its result
-  (`let _ =`), so a denied portal, a dead session or a broken backend left
-  the engine green "Running" with no clicks and nothing in the error slot.
-- Fix:
-  - `src/clicker/types.rs`: `perform_single_click` now returns
-    `Result<(), String>`; `move_mouse` and `button` failures abort the
-    click (fail-fast — clicking in a wrong place is worse than not
-    clicking), and an empty `Sequence` target is rejected defensively.
-  - `src/clicker/engine.rs`: the click loop is factored into
-    `run_click_loop`; the first injection failure records
-    `Click failed: <reason>` in the engine error slot (only while the
-    worker is still the current generation) and exits the loop — the
-    existing generation-guarded tail clears the flag, so the UI surfaces
-    the red ERROR state and the profile stays re-armable.
-- Added two deterministic unit tests for the new loop semantics (no enigo
-  needed: fail-fast reporting, and stale-generation errors being dropped).
+### New: kernel-level uinput injection backend (Linux, optional)
+- enigo stayed portal-bound on some Wayland setups; users' distros
+  misbehaving need a portal-free path.
+- `clicker/types.rs`: `ClickBackend` trait + `UinputBackend` — evdev
+  `VirtualDevice` (BTN_* + REL_X/Y) writing straight to the kernel; exact
+  Fixed/Sequence positioning via corner-clamp deltas (−32767 to the
+  top-left corner, exact positive offset after); dropping the backend
+  destroys the virtual device.
+- `clicker/engine.rs`: engines pick the backend at `start` — workers fail
+  through `StartError::NoBackend` (enigo catch_unwind path) or
+  `UinputUnavailable` ("add your user to the uinput group") while staying
+  re-armable.
+- `settings_store.rs`: `input_backend` setting (serde default → enigo);
+  Windows always enigo/SendInput and the settings row is Linux-only.
+- Self-trigger safety: uinput clicks surface in `/dev/input`, but the
+  injected-pair filter (below) already drops them. Real-hardware validation
+  is the last open check.
 
-### Fixed (high): silent mouse-trigger monitor (no feedback, dead readers, no hot-plug)
-- Symptom: `evdev::enumerate()` swallows its own errors (verified from the
-  crate source), so an unreadable `/dev/input` passed silently; a reader
-  thread dying on its first error was gone forever; devices plugged in
-  after startup were never monitored; on Windows a failed `rdev::listen`
-  hook stayed silent.
-- Fix (`src/mouse.rs`, arming gate in `src/app.rs`):
-  - `spawn_monitor` returns a `MouseMonitor` carrying a shared
-    `MonitorStatus` (`Unknown` / `Running(n)` / `Unavailable(reason)`).
-  - Linux: a permanent scanner re-enumerates every 5 s and respawns dead
-    readers (`reader_wanted` dedupe + per-reader alive flags) — dead
-    readers and hot-plugged devices self-heal within one rescan;
-    availability is self-detected (`read_dir` + readable mouse count),
-    never taken from evdev's silent errors.
-  - Windows: a failed hook records `Unavailable("mouse hook failed: …")`.
-  - `toggle_arm` refuses to arm a mouse trigger while the monitor is
-    `Unavailable` and shows the reason in the status line; arming during
-    the first-scan `Unknown` window stays allowed; no proactive status
-    noise at startup.
-- Added a deterministic unit test for the reader respawn lifecycle.
+### New: fixed cadence + true double clicks
+- Old loop slept the full interval after each click, so real cadence was
+  `interval + click latency` (up to ~50% drift). Now the loop follows an
+  `Instant` deadline train; a missed deadline resets to `now + interval`
+  (no catch-up bursts).
+- Double clicks got a 30 ms inter-click gap (`DOUBLE_CLICK_GAP_MS`), so
+  X11/Wayland/Win32 no longer fold the pair into one click.
 
-### Fixed (high): non-atomic file writes (JSON corruption on crash mid-save)
-- Symptom: `save_profile` and `save_settings` used plain `fs::write`
-  (open + truncate + write) — a kill/crash/disk-full mid-write left a
-  truncated JSON file behind permanently (broken profile, or settings
-  silently reset to defaults on load).
-- Fix: new `src/atomic_file.rs` — `write_atomic(path, data)` writes a
-  `.tmp` sibling, flushes (`sync_all`), then atomically renames over the
-  target (POSIX semantics; `MOVEFILE_REPLACE_EXISTING` on Windows; file
-  closed before rename). Both savers use it. Leftover `.tmp` files from a
-  crash are invisible to the profile listing and overwritten by the next
-  save.
-- Added unit tests: replace-existing content and stale-tmp resilience.
-- Accepted limit: full power-loss durability (directory fsync) is out of
-  scope; the threat model is process kill / crash / disk-full.
+### Fixed (critical): saving could delete the profile file
+- Profiles are keyed by their sanitized file stem (`My Profile` ⇔
+  `My_Profile.json`); save compared raw strings, so editing such a profile
+  wrote the file and then deleted it as a phantom "rename".
+- Fix (`app.rs`): renames are detected via `same_profile_file`
+  (sanitized), live state keeps the list stem as its key, and real renames
+  behave as before (save-new + delete-old + armed-state resync).
 
-### Fixed (high): Windows reserved device names silently eat saves
-- Symptom: on Win10/11 (pre-Win11 rule kept for the 10/11 targets)
-  `NUL.json`, `CON.json`, `COM1.json`… are DOS devices even with an
-  extension — `fs::write` reported success while the file went nowhere: a
-  profile was "created" but never listed, never saved. `sanitize_name`
-  already rejected dots and spaces, but kept these bases (and superscript
-  digits like `COM¹` pass `char::is_alphanumeric`, so they survived too).
-- Fix (`src/profile/store.rs`): `is_reserved_name` (case-insensitive,
-  superscript digits normalized to ASCII) + `sanitize_name` appends `_`
-  to reserved bases on every platform (universal rule, as agreed) →
-  `NUL` is stored as `NUL_.json`, which is a safe regular file.
-- Unit tests: reserved bases (lower case, mixed case, `COM¹`) get the
-  suffix; plain names (`COM10`, `COM¹²`, `nul_`) untouched; the
-  `a/b` vs `a:b` collision matrix unchanged.
-- Accepted edge: legacy profiles already saved under a reserved name on
-  Linux (rare) stay listed but fail to load — consequence of the
-  universal rule.
+### Fixed (high): armed hotkeys fired during Capture (#13)
+- The Capture dialog used to route armed global hotkeys — capturing F6
+  while an F6 profile was armed toggled it mid-capture.
+- Fix (`app.rs`): `hotkeys_route_allowed` gates routing; events are still
+  drained, then discarded, while capture is open.
+
+### Fixed (high): self-trigger feedback loop
+- Windows `WH_MOUSE_LL` receives injected clicks like real input, so a
+  profile armed with a trigger equal to its click button killed itself
+  (Hold died instantly, Toggle flickered).
+- Fix (`mouse.rs` + drain in `app.rs`): press→release pairs ≤ 20 ms apart
+  (`PAIR_EPS_MS`) are treated as injected and dropped wholesale, at every
+  routing and capture path.
+- Accepted edge: the fastest physical clicks can also fall inside the
+  20 ms window (rare, humanly indistinguishable from software clicks).
+
+### Fixed (high): zombie RUNNING state after a worker panic
+- A panic inside the click loop left the flag raised forever (green with
+  no clicks, no message).
+- Fix (`clicker/engine.rs`): the worker body runs inside `catch_unwind`;
+  crashes record "Engine crashed: …" and clear the flag.
+
+### Fixed (high): UI freeze on stop (join on the UI thread)
+- `stop()` joined the worker inline — a hung portal call froze the UI
+  indefinitely.
+- Fix (`clicker/engine.rs`): stop signals, waits ≤ 50 ms on a per-worker
+  exit signal, then a detached `rsclicker-join` reaper finishes the join;
+  generation counters keep stale tails from clobbering the next worker.
+
+### Fixed (high): silent injection failures (green, zero clicks)
+- Every enigo result was discarded; a denied portal clicked nothing while
+  staying green.
+- Fix (`clicker/types.rs` + engine loop): the first injection failure
+  stores "Click failed: …" and exits — red state, profile re-armable;
+  the first click of a refused backend also fail-fasts.
+
+### Fixed (high): silent, dead, or blind mouse-trigger monitor
+- Broken `/dev/input` accesses passed silently; dead reader threads never
+  recovered; hot-plugged mice were never seen; Windows hook failure was
+  silent too.
+- Fix (`mouse.rs`): `MonitorStatus` (Unknown/Running(n)/Unavailable)
+  surfaced in the status line on arming; a 5 s scanner respawns dead
+  readers, picks up new devices and self-detects availability; Windows
+  records hook failures.
+
+### Fixed (high): non-atomic profile/settings saves
+- Plain `fs::write` could truncate JSON mid-crash or disk-full; a killed
+  save also silently reset the settings.
+- Fix (`atomic_file.rs`): `.tmp` sibling + flush + atomic rename
+  (`MOVEFILE_REPLACE_EXISTING` on Windows) — used by both savers.
+
+### Fixed (high): Windows reserved device names ate saves
+- `NUL.json`, `COM1.json`… are DOS devices even with an extension — saves
+  reported success while the file never existed.
+- Fix (`profile/store.rs`): superscript digits normalize; reserved bases
+  get a trailing `_` universally (`NUL_.json`).
 
 ### Fixed (high): stale armed state after saving edits
-- Symptom: `ArmedProfile` was a snapshot taken at arm time (config,
-  trigger, press mode). Editing and saving an armed profile updated the
-  file while the old trigger kept routing — e.g. changing F6 to F7 and
-  saving still left F6 firing, and interval/press-mode/points edits were
-  invisible to the live engine.
-- Fix (live-resync, as agreed): armed matching state is preserved
-  silently; anything else is rebuilt after the save.
-  - `src/trigger.rs`: `armed_matches_profile` — pure comparison of the
-    armed snapshot against the profile (same trigger id — hotkeys are
-    re-parsed, so an unparseable edit never matches — plus press mode and
-    click config, where an unusable config never matches).
-  - `src/app.rs`: arming resolution is factored into
-    `resolve_effective_trigger` (monitor gate, duplicate checks,
-    registration — identical user-visible reason strings), and
-    `resync_after_save` runs after a successful save: unchanged state is
-    left untouched ("Saved <name>"), a changed armed profile is rebuilt
-    (trigger re-registered, running engine restarted with the new
-    config, "Saved <name> — armed state updated.") and renames carry the
-    armed state under the new key. A failed rebuild (conflicting
-    trigger, unusable hotkey, empty sequence, missing monitor) cleans up
-    to Idle and reports the reason: "Saved <name>. Disarmed: <reason>".
-- Manual Start/Stop engines from the editor keep their explicit snapshot
-  semantics (unchanged by design).
-- Unit tests: snapshot equality + edit matrix (interval, hotkey, press
-  mode, click button, trigger button) + unusable-state matrix
-  (unparseable hotkey, empty sequence) for `armed_matches_profile`.
+- Veterans ran the old snapshot: editing an armed profile kept firing the
+  old trigger/config while the file showed the new one.
+- Fix (`trigger.rs` + `app.rs`): unchanged state survives saves untouched;
+  changed armed profiles rebuild live (re-register, restart into the new
+  config, carry renames), and failed rebuilds disarm with the reason.
 
-### Session verification
-- `cargo test --release`: 15 tests pass (engine 6, mouse monitor 1,
-  atomic-file 2, reserved names 3, trigger resync 3).
-- `cargo build --release`: clean.
+### Minor batch
+- Poisoned-mutex consistency (`take_error`, monitor status), a windows
+  reserved-name test matrix, engines pruned when idle so the map cannot
+  grow unbounded, interval input hard stop at 60 min with a pure
+  `resolve_interval` (rejects `"1e300"`), failed settings saves keep the
+  in-session choice, deleting a profile surfaces a failed delete of the
+  old file instead of silently orphaning it.
+- Hotkey binding helpers trimmed to what the app uses.
 
-## Session 2 — 2026-10-17
+## Known open items
 
-### Fixed (high): self-trigger feedback loop when the trigger button equals the click button
-- Symptom: a profile armed with a mouse trigger identical to its click
-  button was destroyed by its own clicks. On Windows the rdev hook is a
-  `WH_MOUSE_LL` low-level hook, which receives the app's own injected
-  `SendInput` clicks like any real input (rdev does not expose
-  `LLMHF_INJECTED`), so: **Toggle** stopped the engine at the first
-  injected click (the injected *press* edge toggled it off) and **Hold**
-  stopped it instantly (the injected *release* edge arrived while the
-  trigger was held). One click, then dead — or a stop/start feedback
-  flicker at rapid intervals. Linux XTEST/libei injection never re-enters
-  `/dev/input`, so no live Linux loop exists today; the fix is still
-  cross-platform and future-proofs any uinput-style Linux backend
-  (e.g. a re-added enigo `wayland` feature).
-- Fix (`src/mouse.rs`, drain in `src/app.rs`):
-  - `MouseEvent::Press/Release` now carry the device timestamp (millis
-    since the UNIX epoch): evdev uses `InputEvent::timestamp()` (same
-    timeval for a click's press+release), rdev uses the per-event
-    `Event.time = SystemTime::now()` stamped inside the hook callback.
-  - New pure function `filter_injected_pairs`: a same-button
-    press→release pair with a gap ≤ `PAIR_EPS_MS` (20 ms) is an injected
-    click fingerprint — SendInput pairs land ≤ ~2 ms apart, evdev pairs
-    share a timeval, while the fastest physical release stays far above
-    the bound. Both edges are dropped together — a release only cancels
-    its latest *unmatched* press, so held-button semantics still route
-    normally.
-  - The Tick handler drains the monitor channel into a batch, filters,
-    then routes/captures the survivors — so self-injected clicks can
-    never re-trigger an armed profile, and a running engine cannot pollute
-    a concurrent Capture session.
-- Accepted edge: a physical release within 20 ms of its press (jitter
-  clickers/fast macros) is indistinguishable from injection and is
-  dropped too; split pairs across two drain batches are theoretically
-  possible but practically impossible for near-instant injection pairs.
-- Added 10 portable unit tests (`mouse::filter_tests`): instant pair,
-  double-click pairs, slow pair survives, release-before-press never
-  pairs, stale long press intact, unpaired held press, cross-button
-  independence + ordering, held press with concurrent other-button pair,
-  and slow pair followed by a fast pair.
-
-### Minor batch: poisoned-mutex consistency + cosmetic leftovers (#11)
-- `ClickEngine::take_error()` now opens its slot with
-  `unwrap_or_else(|e| e.into_inner())` (was `lock().ok()?`), matching the
-  rest of the codebase — a poisoned slot no longer drops a pending error.
-  `MouseMonitor::status()` got the same unlock-on-poison style instead of
-  silently falling back to `Unknown`.
-- Dead code removed: `hotkey/binding.rs` keeps only `parse_hotkey`
-  (`describe_modifiers`, `example_keys`, `default_toggle`,
-  `hotkey_to_string` deleted together with their `#[allow(dead_code)]`
-  markers), and `HotkeyService::available()` is gone.
-- `Message::Stop` no longer overwrites the status unconditionally: it
-  stamps "Stopped." only when the engine was actually running.
-- `new()` no longer swallows a corrupt default profile: a missing
-  `default.json` stays the normal first-run path, but a present file
-  that fails to parse shows "default profile failed to load: …" at
-  startup (built-in defaults are used meanwhile).
-- Renaming a profile surfaces a failed delete of the old file instead of
-  silently orphaning it: "Saved <new> (old file kept: <reason>)".
-- ApplySettings keeps the user's in-session choice on a failed save and
-  says so ("Settings kept in memory — save failed: …").
-- Interval input: `MAX_INTERVAL_MS = 3_600_000` is now the single shared
-  bound (used by `ClickConfig::sanitized_interval_ms` and the UI). New
-  pure `resolve_interval` replaces the open-coded parsing: empty input
-  means "no change", tiny positives still clamp to 1 ms, and values above
-  60 minutes are **rejected** with "Interval too large — maximum is
-  60 min" while the previous value stays — `"1e300"` can no longer store
-  `u64::MAX` into a profile file. 6 unit tests added.
-- The `engines` map can no longer grow unbounded: `drain_engine_errors`
-  retains only running engines and prunes idle ones (an engine that just
-  reported an error is surfaced first and pruned on the next tick). Since
-  state colors derive from the `errors` and `armed` maps, nothing
-  user-visible changes.
-
-### Session verification
-- `cargo test --release`: 31 tests pass (engine 6, mouse 11, atomic-file
-  2, reserved names 3, trigger resync 3, interval 6).
-- `cargo build --release`: clean.
-- `cargo check --target x86_64-pc-windows-gnu --release`: clean.
-
-## Session 3 — 2026-10-18
-
-### Fixed (critical): saving kept a stale display name → profile file deleted
-- Symptom: profiles are listed and keyed by their sanitized file stem
-  (`My Profile` is stored as `My_Profile.json` and listed as
-  `My_Profile`). Saving such a profile from the editor compared the raw
-  strings — `"My Profile" != "My_Profile"` — so `SaveProfile` treated
-  every save as a rename: it wrote `My_Profile.json` (same file), then
-  `delete_profile("My_Profile")` deleted the file just written. The
-  profile vanished from disk on the first Save; armed state pointed at a
-  key the list no longer shows. Found by the session-3 self-audit (user
-  asked for undocumented bugs), not user-reported.
-- Fix (`src/app.rs`):
-  - `SaveProfile` decides "rename" with `same_profile_file(old, new)` —
-    sanitized comparison — instead of raw string inequality; the
-    duplicate-name check now only fires when the target file actually
-    differs from the old one (`editing_name` also only moves on a real
-    rename, so the editor's manual-engine key stays the list stem).
-  - `resync_after_save` treats a save whose display name sanitizes onto
-    the same file as a same-key save: armed/engines/errors keep their
-    list key (no spurious rebuild/rearm when the config is unchanged,
-    rebuild stays under the stem key when it is needed). Real renames
-    (different sanitized file) behave exactly as before: state moves to
-    the new key, the old file is deleted.
-- Tests: `sanitize_collision_matrix` extended with the stem-vs-display
-  cases (`"My Profile"` vs `"My_Profile"`, `"Nice profile!"` vs
-  `"Nice_profile_"`).
-
-### Fixed (high): armed hotkeys routed while the Capture modal was open (#13)
-- Symptom: `Message::Tick` polled and routed global-hotkey events
-  unconditionally, so an armed profile kept firing while the Capture
-  modal recorded a new trigger — pressing F6 to capture F6 toggled the
-  F6-armed profile instead of being sampled (mouse events already gated
-  capture vs routing; hotkeys did not). Backlog issue #13.
-- Fix (`src/app.rs`): `hotkeys_route_allowed(top_modal)` gates
-  `route_hotkey`; while capture is open the hotkey queue is still drained
-  so events don't pile up, but every edge is discarded. The capture flow
-  itself is unaffected (keyboard capture runs via `Message::KeyEvent`,
-  which keeps its own modal gate).
-- Tests: `app::hotkey_gate_tests` — capture suppresses, other modals and
-  `None` route.
-
-### Fixed (medium): click-interval drift accumulated per click (#10)
-- Symptom: the loop slept the full configured interval *after* the click,
-  so the cadence was `interval + click_latency` — an XTEST/libei/SendInput
-  click costs 10–30 ms, meaning a 40 ms profile drifted ~50% slow (CPS
-  understated with every profile kind; the cost also varies per backend).
-- Fix (`src/clicker/engine.rs`): `run_click_loop` follows a shared
-  deadline train (`Instant`): the deadline for click k is
-  `start + k·interval`; each iteration sleeps only until its deadline (in
-  ≤ 50 ms responsive slices), and a deadline already in the past (slow
-  backend, machine nap) resets `now + interval` instead of bursting
-  catch-up clicks.
-- Tests: `cadence_follows_deadlines_not_click_latency` — 6 clicks,
-  50 ms interval, 30 ms simulated injection cost: the first-to-last span
-  stays ≈ 250 ms (the old loop produced ≈ 400 ms); slice stops still
-  covered by the existing removal of the old per-iteration full sleep.
-
-### Fixed (medium): double click had no inter-click gap (#12)
-- Symptom: `ClickKind::Double` issued two zero-distance
-  `enigo.button(.., Click)` calls — X11, Wayland compositors and Win32 can
-  fold two events with no gap into a single press, so targets requiring a
-  real double click (e.g. list rows, file dialogs) mistook it for one
-  click.
-- Fix (`src/clicker/types.rs`): new const `DOUBLE_CLICK_GAP_MS = 30` —
-  `perform_single_click` sleeps that long between the paired clicks, a
-  human-like gap that is negligible against any configured profile
-  interval. The gap applies only inside the pair, so the injected-pair
-  filter (Session 2) still recognizes each half as its own instant
-  press→release pair.
-
-### Docs: `docs/ARCHITECTURE.md` refresh
-- The two session-1 wording debts are fixed: "stop signals and joins it"
-  → bounded 50 ms wait + detached reaper + generation counters; "renaming
-  a profile moves the file" → save-new + delete-old only when the
-  sanitized file name changes, live state rebuilt onto the new key.
-- Also documents the deadline train, the capture-modal hotkey gate and
-  the drift-free cadence.
-
-### Added: secondary Linux injection backend — kernel-level uinput
-- Why: the user's distro currently misbehaves on the desktop portals, so a
-  backend that bypasses portals entirely is wanted — non-default, switched
-  in the Linux settings, while enigo stays the first choice.
-- `src/clicker/types.rs`: new `ClickBackend` trait — `EnigoBackend` wraps
-  the previous single path (identical click semantics incl. the
-  double-click gap), `UinputBackend` (Linux) builds an evdev
-  `VirtualDevice` (BTN_LEFT/RIGHT/MIDDLE + REL_X/REL_Y) and emits
-  press/release batches; Fixed/Sequence targets steer via
-  `abs_move_deltas` corner-clamp — one −32767 delta clamps at the
-  top-left screen corner, then the exact positive offset applies (no
-  screen-size queries needed). Dropping the backend destroys the virtual
-  device.
-- `src/clicker/engine.rs`: `InjectionBackend` (Enigo | Uinput) is plumbed
-  through `ClickEngine::start(config, backend)` → `worker_body`; a failed
-  `/dev/uinput` open surfaces as `StartError::UinputUnavailable("… add
-  your user to the uinput group and re-login.")` — red ERROR state, the
-  profile stays re-armable after fixing permissions. Enigo keeps its
-  catch_unwind NoBackend handling unchanged.
-- `src/settings_store.rs`: `AppSettings.input_backend: InputBackend`
-  (`#[serde(default)]` — old `settings.json` files stay loadable; default
-  is `Enigo`). Windows ignores the setting (always enigo/SendInput) via
-  `to_engine_backend`.
-- `src/views/dialogs.rs`: Linux-only "Input emulation" option row
-  (enigo/uinput, same option-button style) + one hint line about needing
-  the `uinput` group; everything hidden on Windows.
-- Self-trigger note: uinput clicks DO surface in `/dev/input` (unlike
-  XTEST) — Session 2's `filter_injected_pairs` already covers this (each
-  injected press→release pair lands within the 20 ms window and both
-  edges are dropped). Needs one runtime sanity pass on real hardware
-  after enabling the group.
-- Tests +5: settings missing-field → Enigo, serde roundtrip, setting→
-  backend mapping (Linux), corner-clamp reaching exact targets under
-  simulated screen-edge clamping, sequence target resolution by index.
-- Device creation itself is not unit-testable (needs `/dev/uinput`
-  permission); verified logically, real-hardware check pending.
-
-### Session verification
-- `cargo test --release`: 39 tests pass (34 previous + 5 backend/settings).
-- `cargo build --release`: clean, zero warnings.
-- `cargo check --target x86_64-pc-windows-gnu --release`: clean, zero
-  warnings.
+- uinput backend needs one real-hardware pass (group permission + loop
+  behavior + portal-less Wayland session).
+- Versioned docs for profile files: no schema version yet — new fields
+  must keep `serde(default)`.
