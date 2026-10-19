@@ -62,8 +62,8 @@ How clicks reach the screen, switchable in *Settings → Input emulation*
 Download the latest build for your platform from the
 [Releases page](https://github.com/voidx9x/RsClicker/releases):
 
-- `RsClicker-windows-x64.exe` — Windows 10/11.
-- `RsClicker-linux-x86_64` — Linux tarball binary.
+- `RsClicker-26.10.19-windows.exe` — Windows 10/11.
+- `RsClicker-26.10.19-linux` — Linux tarball binary.
 
 <!-- TODO: keep artifact names in sync with the release packaging
      (docs/BUILDING.md — Release packaging). -->
