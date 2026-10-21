@@ -60,7 +60,7 @@ How clicks reach the screen, switchable in *Settings → Input emulation*
 ### Pre-built binaries
 
 Download the latest build for your platform from the
-[Releases page](https://github.com/voidx9x/RsClicker/releases):
+[Releases page](https://github.com/angrino/RsClicker/releases):
 
 - `RsClicker-26.10.19-windows.exe` — Windows 10/11.
 - `RsClicker-26.10.19-linux` — Linux tarball binary.
@@ -153,7 +153,7 @@ Bug reports, feature requests and pull requests are welcome.
 ## Credits
 
 Developed with AI assistance ([opencode](https://opencode.ai)); design,
-testing on real hardware, and all product decisions by **voidx9x**.
+testing on real hardware, and all product decisions by me, ANGRINO.
 
 ## License
 
