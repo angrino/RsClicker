@@ -2,7 +2,7 @@
 name = "RsClicker"
 version = "0.1.0"
 edition = "2021"
-authors = ["voidx9x"]
+authors = ["ANGRINO"]
 license = "MIT"
 description = "Cross-platform auto clicker written in Rust"
 keywords = ["autoclicker", "automation", "gui"]
