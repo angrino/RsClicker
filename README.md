@@ -146,7 +146,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Bug reports, feature requests and pull requests are welcome.
 
-- Found a bug or have an idea? [Open an issue](https://github.com/voidx9x/RsClicker/issues).
+- Found a bug or have an idea? [Open an issue](https://github.com/angrino/RsClicker/issues).
 - Before sending a PR, please run `cargo fmt` and `cargo clippy`, and describe
   what you tested and on which platform.
 
