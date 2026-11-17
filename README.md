@@ -73,7 +73,7 @@ Download the latest build for your platform from the
 Requires a recent stable [Rust toolchain](https://rustup.rs).
 
 ```bash
-git clone https://github.com/voidx9x/RsClicker.git
+git clone https://github.com/angrino/RsClicker.git
 cd RsClicker
 cargo build --release
 ./target/release/RsClicker
